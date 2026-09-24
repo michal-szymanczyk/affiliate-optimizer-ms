@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Affiliate Optimizer">
+  <title>Affiliate Optimizer</title>
+  <!--
+    One click arrives; it is routed to one network and not the others. The chosen path carries the
+    arrowhead, the road not taken is a stub. Routing is final (DESIGN.md section 3.1).
+
+    Deliberately down to three strokes. An earlier version drew both rejected branches at 40%
+    opacity, which read at 64px and turned to mush at 16, the size a favicon is
+    actually displayed at. Faint detail is not detail at 16px; it is noise.
+
+    Industry palette: accent tile, near-white mark, legible on a light or dark tab strip.
+  -->
+  <rect width="32" height="32" rx="7" fill="#5980a6"/>
+  <g fill="none" stroke="#f2f2f3" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- The click, forking up into the network it was routed to. -->
+    <path d="M4 22 H13 L23 11"/>
+    <!-- Arrowhead on the chosen branch. -->
+    <path d="M17.5 10.5 H23.5 V16.5"/>
+    <!-- The road not taken. -->
+    <path d="M13 22 H21" opacity="0.45"/>
+  </g>
+</svg>

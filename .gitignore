@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output and caches
+dist/
+build/
+.vite/
+.cache/
+*.tsbuildinfo
+
+# Test coverage and Playwright artifacts
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# Local environment configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.template
+
+# Logs
+logs/
+*.log
+
+# Editor and operating system files
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

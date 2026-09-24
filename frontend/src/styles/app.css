@@ -1,0 +1,34 @@
+/**
+ * The Industry design system, linked as-is rather than transcribed.
+ *
+ * Its `:root` block is the token source of truth, so the components reference the variable names
+ * and never the hex values. Retune the system in that file and the client follows.
+ */
+@import './industry-styles.css';
+
+/*
+ * The "Errors" filter labels a RADIOGROUP, not a single input, so it cannot be a `<label for=...>`
+ * and therefore misses Industry's `.field > label` rule — which is what stacks a label above its
+ * control with a 5px gap. Without this the text jams straight against the segmented control while
+ * every other filter in the row is spaced correctly.
+ *
+ * Values match `.field > label` in industry-styles.css deliberately: this is the same label, just
+ * on an element that rule cannot select.
+ */
+.field > .field-label {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 5px;
+  color: color-mix(in srgb, var(--color-text) 70%, transparent);
+}
+
+/* The pulsing status dot beside "polling". Industry names the animation; this defines it. */
+@keyframes ind-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}

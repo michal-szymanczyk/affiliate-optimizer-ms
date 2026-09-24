@@ -1,0 +1,805 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Affiliate Service",
+    "version": "1.0.0",
+    "description": "Route clicks to affiliate networks and find out, a minute later, what each one actually paid.\n\n**The advertised rate is a claim, not a promise.** Some networks honor it. Some do not.\nSome pay well at certain times and poorly at others. Some are genuinely noisy. There is no\nendpoint that tells you what a network \"really\" pays, and you can never learn what a click\nwould have earned somewhere else -- you only see what happened on the clicks you routed.\n\n### The rules\n\n- **One click, one route.** Routing is final. Rejections still spend the click.\n- **Clicks expire** 2 minutes after issue.\n- **Clicks are rationed**: 20/min, bursting to 40.\n- **Commissions are delayed** by 1 minute, so you always act on slightly stale information.\n- The commission feed permits 60 polls/min.\n\n### Errors\n\nEvery error carries a stable, machine-readable `code`. Branch on the code, never on the\nmessage. `RATE_LIMITED` also carries `retryAfterSeconds`; honor it and you will be admitted."
+  },
+  "tags": [
+    {
+      "name": "Reference",
+      "description": "Merchants and networks. Static for the run -- fetch once."
+    },
+    {
+      "name": "Clicks",
+      "description": "Issuing and routing. This is where the decisions happen."
+    },
+    {
+      "name": "Commissions",
+      "description": "What you actually earned, one minute late."
+    }
+  ],
+  "components": {
+    "schemas": {
+      "MerchantList": {
+        "type": "object",
+        "properties": {
+          "merchants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Merchant"
+            }
+          }
+        },
+        "required": [
+          "merchants"
+        ]
+      },
+      "Merchant": {
+        "type": "object",
+        "properties": {
+          "merchantId": {
+            "type": "integer",
+            "minimum": 1,
+            "example": 42
+          },
+          "name": {
+            "type": "string",
+            "example": "Target"
+          }
+        },
+        "required": [
+          "merchantId",
+          "name"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "MERCHANT_NOT_SUPPORTED",
+              "CLICK_EXPIRED",
+              "CLICK_NOT_FOUND",
+              "NETWORK_NOT_FOUND",
+              "INVALID_CURSOR",
+              "INVALID_REQUEST",
+              "RATE_LIMITED",
+              "UNAUTHORIZED"
+            ],
+            "description": "Stable, machine-readable. Branch on this, not on the message.",
+            "example": "MERCHANT_NOT_SUPPORTED"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryAfterSeconds": {
+            "type": "number",
+            "description": "Present on RATE_LIMITED. Seconds until a token exists."
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "NetworkList": {
+        "type": "object",
+        "properties": {
+          "networks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Network"
+            }
+          }
+        },
+        "required": [
+          "networks"
+        ]
+      },
+      "Network": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "net-vanguard"
+          },
+          "name": {
+            "type": "string",
+            "example": "Vanguard Click Exchange"
+          },
+          "advertisedRate": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Public, fixed, non-binding headline rate. PER CLICK: this network pays for traffic, not for sales, so no purchase is involved anywhere. Not what the network actually pays.",
+            "example": 0.775
+          },
+          "supportedMerchantIds": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Merchants this network covers. Public, so routing a click to a network that does not cover its merchant is an avoidable mistake -- and it still spends the click.",
+            "example": [
+              1,
+              4,
+              7,
+              12
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "advertisedRate",
+          "supportedMerchantIds"
+        ]
+      },
+      "Click": {
+        "type": "object",
+        "properties": {
+          "clickId": {
+            "type": "string",
+            "example": "clk_7b2e91a4c6d8f0a3b5c7e9d1"
+          },
+          "merchantId": {
+            "type": "integer",
+            "minimum": 1,
+            "example": 42
+          },
+          "issuedAt": {
+            "type": "string",
+            "description": "ISO 8601.",
+            "example": "2026-08-17T09:14:03.221Z"
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "ISO 8601. 2 minutes after issue; route it before then or lose it.",
+            "example": "2026-08-17T09:16:03.221Z"
+          }
+        },
+        "required": [
+          "clickId",
+          "merchantId",
+          "issuedAt",
+          "expiresAt"
+        ]
+      },
+      "RouteAccepted": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "accepted"
+            ]
+          },
+          "clickId": {
+            "type": "string"
+          },
+          "networkId": {
+            "type": "string"
+          },
+          "routedAt": {
+            "type": "string",
+            "description": "ISO 8601."
+          },
+          "alreadyRouted": {
+            "type": "boolean",
+            "description": "True when the accepted routing happened on an earlier call and this response is its replay."
+          },
+          "commissionAvailableAt": {
+            "type": "string",
+            "description": "ISO 8601. When the commission appears in GET /commissions -- 1 minute(s) after routing."
+          }
+        },
+        "required": [
+          "outcome",
+          "clickId",
+          "networkId",
+          "routedAt",
+          "alreadyRouted",
+          "commissionAvailableAt"
+        ]
+      },
+      "RouteRejected": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "rejected"
+            ]
+          },
+          "clickId": {
+            "type": "string"
+          },
+          "networkId": {
+            "type": "string"
+          },
+          "routedAt": {
+            "type": "string",
+            "description": "ISO 8601."
+          },
+          "alreadyRouted": {
+            "type": "boolean",
+            "description": "True when the original rejection happened on an earlier call and this response is its replay."
+          },
+          "errorCode": {
+            "type": "string",
+            "enum": [
+              "MERCHANT_NOT_SUPPORTED",
+              "CLICK_EXPIRED"
+            ],
+            "description": "Why the route was rejected. The click is spent, and retrying cannot change this outcome.",
+            "example": "MERCHANT_NOT_SUPPORTED"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "clickId",
+          "networkId",
+          "routedAt",
+          "alreadyRouted",
+          "errorCode",
+          "message"
+        ]
+      },
+      "RouteRequest": {
+        "type": "object",
+        "properties": {
+          "networkId": {
+            "type": "string",
+            "minLength": 1,
+            "example": "net-vanguard"
+          }
+        },
+        "required": [
+          "networkId"
+        ]
+      },
+      "CommissionFeed": {
+        "type": "object",
+        "properties": {
+          "commissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommissionRow"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque and server-signed -- treat it as a blob, and store it after every call. It advances past the last row returned, and comes back UNCHANGED when there was nothing new, so a caught-up client keeps its place. An empty page is normal, especially in your first minute. Null only before anything has ever been disclosed to you."
+          }
+        },
+        "required": [
+          "commissions",
+          "nextCursor"
+        ]
+      },
+      "CommissionRow": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SettlementEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RejectionEvent"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "settlement": "#/components/schemas/SettlementEvent",
+            "rejection": "#/components/schemas/RejectionEvent"
+          }
+        }
+      },
+      "SettlementEvent": {
+        "type": "object",
+        "properties": {
+          "clickId": {
+            "type": "string"
+          },
+          "merchantId": {
+            "type": "integer"
+          },
+          "routedNetworkId": {
+            "type": "string"
+          },
+          "routedAt": {
+            "type": "string",
+            "description": "ISO 8601. When the click was committed."
+          },
+          "disclosedAt": {
+            "type": "string",
+            "description": "ISO 8601. When this event became visible."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "settlement"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "settled"
+            ]
+          },
+          "commission": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Realized earnings for this click. Per click, not per order; four decimal places are significant.",
+            "example": 0.5713
+          },
+          "errorCode": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "clickId",
+          "merchantId",
+          "routedNetworkId",
+          "routedAt",
+          "disclosedAt",
+          "kind",
+          "state",
+          "commission",
+          "errorCode"
+        ]
+      },
+      "RejectionEvent": {
+        "type": "object",
+        "properties": {
+          "clickId": {
+            "type": "string"
+          },
+          "merchantId": {
+            "type": "integer"
+          },
+          "routedNetworkId": {
+            "type": "string"
+          },
+          "routedAt": {
+            "type": "string",
+            "description": "ISO 8601. When the click was committed."
+          },
+          "disclosedAt": {
+            "type": "string",
+            "description": "ISO 8601. When this event became visible."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "rejection"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "rejected"
+            ]
+          },
+          "commission": {
+            "type": "null"
+          },
+          "errorCode": {
+            "type": "string",
+            "enum": [
+              "MERCHANT_NOT_SUPPORTED",
+              "CLICK_EXPIRED"
+            ],
+            "description": "Why the route was rejected.",
+            "example": "MERCHANT_NOT_SUPPORTED"
+          }
+        },
+        "required": [
+          "clickId",
+          "merchantId",
+          "routedNetworkId",
+          "routedAt",
+          "disclosedAt",
+          "kind",
+          "state",
+          "commission",
+          "errorCode"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/merchants": {
+      "get": {
+        "summary": "The merchant reference table",
+        "description": "The 100 merchants a click can originate from. Static for the whole exercise -- fetch once. Merchants carry no hidden information; they only determine which networks are eligible for a click.",
+        "tags": [
+          "Reference"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Public half of the credential pair issued to you.",
+              "example": "ak_3f9a2c7b1e4d8a0f5c6b2e91"
+            },
+            "required": true,
+            "description": "Public half of the credential pair issued to you.",
+            "name": "x-app-key",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Private half. Sent as a header over HTTPS; requests are not signed.",
+              "example": "as_8d1c4b7f2a9e6c3d0b5a8f24"
+            },
+            "required": true,
+            "description": "Private half. Sent as a header over HTTPS; requests are not signed.",
+            "name": "x-app-secret",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The reference table.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, rotated or archived credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/networks": {
+      "get": {
+        "summary": "The networks you can route to",
+        "description": "All 15 networks, with their advertised rate and merchant coverage. Both are public and fixed. The advertised rate is a claim, not a promise: some networks honor it, some do not, and some pay well only at certain times. Nothing in this response tells you which.",
+        "tags": [
+          "Reference"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Public half of the credential pair issued to you.",
+              "example": "ak_3f9a2c7b1e4d8a0f5c6b2e91"
+            },
+            "required": true,
+            "description": "Public half of the credential pair issued to you.",
+            "name": "x-app-key",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Private half. Sent as a header over HTTPS; requests are not signed.",
+              "example": "as_8d1c4b7f2a9e6c3d0b5a8f24"
+            },
+            "required": true,
+            "description": "Private half. Sent as a header over HTTPS; requests are not signed.",
+            "name": "x-app-secret",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every network, public fields only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, rotated or archived credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clicks/next": {
+      "post": {
+        "summary": "Issue one click",
+        "description": "Issues a single click naming one merchant. Route it within 2 minutes or it lapses and cannot be recovered. Throttled per candidate.",
+        "tags": [
+          "Clicks"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Public half of the credential pair issued to you.",
+              "example": "ak_3f9a2c7b1e4d8a0f5c6b2e91"
+            },
+            "required": true,
+            "description": "Public half of the credential pair issued to you.",
+            "name": "x-app-key",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Private half. Sent as a header over HTTPS; requests are not signed.",
+              "example": "as_8d1c4b7f2a9e6c3d0b5a8f24"
+            },
+            "required": true,
+            "description": "Private half. Sent as a header over HTTPS; requests are not signed.",
+            "name": "x-app-secret",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A fresh click.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Click"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Bad credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Throttled. Carries retryAfterSeconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clicks/{clickId}/route": {
+      "post": {
+        "summary": "Route a click to a network",
+        "description": "Final and irreversible: a click routes exactly once, whether or not it earns anything. Routing to a network that does not cover the click's merchant is rejected AND spends the click -- coverage is public, so that is an avoidable mistake. Never returns a commission; the commission appears in GET /commissions one minute later. Calling this again for the same click faithfully replays its accepted or rejected outcome, with alreadyRouted: true. Retrying the same route after an ambiguous timeout is safe.",
+        "tags": [
+          "Clicks"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "example": "clk_7b2e91a4c6d8f0a3b5c7e9d1"
+            },
+            "required": true,
+            "name": "clickId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Public half of the credential pair issued to you.",
+              "example": "ak_3f9a2c7b1e4d8a0f5c6b2e91"
+            },
+            "required": true,
+            "description": "Public half of the credential pair issued to you.",
+            "name": "x-app-key",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Private half. Sent as a header over HTTPS; requests are not signed.",
+              "example": "as_8d1c4b7f2a9e6c3d0b5a8f24"
+            },
+            "required": true,
+            "description": "Private half. Sent as a header over HTTPS; requests are not signed.",
+            "name": "x-app-secret",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Routing accepted, or an accepted routing replayed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Bad credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown click or network.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "CLICK_EXPIRED. The click is spent; retries replay this outcome.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteRejected"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "MERCHANT_NOT_SUPPORTED. The click is spent; retries replay this outcome.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteRejected"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/commissions": {
+      "get": {
+        "summary": "Commissions disclosed since your last call",
+        "description": "Commissions become visible 1 minute(s) after you route, so you are always acting on slightly stale information. Rejected clicks appear here immediately, with an errorCode and no commission, so every click you spent reaches a state you can observe. Clicks you let lapse never appear -- you already know their expiry. Page with the opaque cursor; an empty page is normal.",
+        "tags": [
+          "Commissions"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "The opaque cursor from your last response. Omit it to start from the beginning. It is server-signed: do not construct or edit one."
+            },
+            "required": false,
+            "description": "The opaque cursor from your last response. Omit it to start from the beginning. It is server-signed: do not construct or edit one.",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Public half of the credential pair issued to you.",
+              "example": "ak_3f9a2c7b1e4d8a0f5c6b2e91"
+            },
+            "required": true,
+            "description": "Public half of the credential pair issued to you.",
+            "name": "x-app-key",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Private half. Sent as a header over HTTPS; requests are not signed.",
+              "example": "as_8d1c4b7f2a9e6c3d0b5a8f24"
+            },
+            "required": true,
+            "description": "Private half. Sent as a header over HTTPS; requests are not signed.",
+            "name": "x-app-secret",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newly disclosed rows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommissionFeed"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "INVALID_CURSOR.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Bad credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Throttled. Carries retryAfterSeconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}
