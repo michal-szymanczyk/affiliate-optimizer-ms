@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Persistence: AppDbContext, entities, EF mappings, migrations, feature repository implementations (ArchitectureSimple.md §3.2). -->
+  <ItemGroup>
+    <ProjectReference Include="..\AffiliateOptimizer.Domain\AffiliateOptimizer.Domain.csproj" />
+    <ProjectReference Include="..\Common\Common.Repository\Common.Repository.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" />
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

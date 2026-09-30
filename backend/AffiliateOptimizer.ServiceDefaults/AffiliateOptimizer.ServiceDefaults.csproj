@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    What an Aspire-orchestrated host shares: OpenTelemetry to the dashboard and /health + /alive.
+    Trimmed on purpose against the Aspire template: no Microsoft.Extensions.ServiceDiscovery (the host calls one
+    configured URL) and no Microsoft.Extensions.Http.Resilience (POST /clicks/next is not idempotent; the click loop
+    owns retries, see ServiceExtension.cs in AffiliateOptimizer.Web).
+  -->
+  <PropertyGroup>
+    <IsAspireSharedProject>true</IsAspireSharedProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
+  </ItemGroup>
+
+</Project>

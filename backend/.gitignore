@@ -1,0 +1,9 @@
+# .NET build output
+bin/
+obj/
+*.user
+.vs/
+TestResults/
+
+# Published SPA copy (the source lives in ../frontend)
+AffiliateOptimizer.Web/wwwroot/

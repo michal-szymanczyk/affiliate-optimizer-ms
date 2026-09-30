@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Use cases as vertical feature slices. No EF Core, no HTTP types (ArchitectureSimple.md §1.2 rule 1). -->
+  <ItemGroup>
+    <ProjectReference Include="..\Common\Common.Domain\Common.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Platform library (ArchitectureSimple.md §1.2): request pipeline, validation, exceptions,
+    exception middleware, system time, list queries and paging. The framework reference is
+    needed only for the middleware (HttpContext) and the DI / logging abstractions.
+  -->
+  <PropertyGroup>
+    <RootNamespace>Common.Domain</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" />
+  </ItemGroup>
+
+</Project>

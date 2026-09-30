@@ -1,0 +1,24 @@
+<Project Sdk="Aspire.AppHost.Sdk/13.6.0">
+
+  <!--
+    Local orchestration only: one `dotnet run` starts the Affiliate Service stand-in, the host and the Vite dev server,
+    with a dashboard for their logs, traces and health. TargetFramework, Nullable and ImplicitUsings come from
+    ../Directory.Build.props. Aspire.Hosting.AppHost is referenced implicitly by the SDK: never list it in
+    Directory.Packages.props (NU1009).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <UserSecretsId>affiliate-optimizer-apphost</UserSecretsId>
+    <!-- `dotnet run` hands over to `aspire run` (Aspire.Cli acquired through dnx on first use). false raises ASPIRE010, an error here. -->
+    <AspireUseCliBundle>true</AspireUseCliBundle>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AffiliateOptimizer.Web\AffiliateOptimizer.Web.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.JavaScript" />
+  </ItemGroup>
+
+</Project>

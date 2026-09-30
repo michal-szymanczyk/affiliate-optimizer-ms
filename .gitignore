@@ -40,3 +40,10 @@ logs/
 *~
 .DS_Store
 Thumbs.db
+
+# .NET publish output and Playwright auth state
+publish/
+frontend/e2e/.auth/
+
+# Claude desktop launch configuration (local convenience)
+.claude/

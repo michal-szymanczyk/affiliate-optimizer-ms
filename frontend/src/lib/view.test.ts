@@ -1,198 +1,115 @@
 /**
- * Feed filtering, sorting and backoff.
+ * Formatting and sort state.
  *
- * The filter tests pin one distinction the UI would otherwise blur: "errors only" means clicks that
- * FAILED, which is not the same as "clicks carrying an error code" — a lapsed click has no code and
- * is still a failure, and a live click that will eventually expire has no code yet and is not.
+ * Filtering, sorting and backoff used to be tested here; they now run in the .NET host and are
+ * tested there. What is left is what the browser still owns: how a number or a server timestamp
+ * turns into text, and how a header click cycles.
  */
 import { describe, expect, it } from 'vitest'
-import { applyFilters, filtersAreEmpty, NO_FILTERS } from './filter'
-import { applySort, nextSort, NO_SORT } from './sort'
-import { backoffAfterFailure, CLICK_INTERVAL_MS, MAX_BACKOFF_MS } from '../loop/backoff'
-import type { ClickRecord } from '../loop/clickLog'
+import {
+  ago,
+  count,
+  duration,
+  elapsedMs,
+  money,
+  parseIso,
+  rate,
+  shortClickId,
+  signedPercent,
+  signedRate,
+  until,
+  utcDateTime,
+  utcTime,
+} from './format'
+import { nextSort, NO_SORT, sortParams } from './sort'
 
-const T0 = 1_700_000_000_000
-const EXPIRY = T0 + 120_000
+const NOW = '2026-09-28T12:00:00.000Z'
 
-function record(overrides: Partial<ClickRecord> = {}): ClickRecord {
-  return {
-    clickId: 'clk_default',
-    merchantId: 42,
-    merchantName: 'Target',
-    issuedAt: T0,
-    expiresAt: EXPIRY,
-    routedAt: null,
-    routedNetworkId: null,
-    routedNetworkName: null,
-    commission: null,
-    disclosedAt: null,
-    errorCode: null,
-    ...overrides,
-  }
-}
+describe('money and rate', () => {
+  it('renders totals at two decimals and per-click amounts at four', () => {
+    // $0.0975 per click is real information; "$0.10" would erase it.
+    expect(rate(0.0975)).toBe('$0.0975')
+    expect(money(12.3456)).toBe('$12.35')
+    expect(money(0)).toBe('$0.00')
+  })
 
-const SETTLED = record({
-  clickId: 'clk_settled',
-  merchantName: 'Best Buy',
-  merchantId: 10,
-  routedAt: T0,
-  routedNetworkId: 'net-a',
-  routedNetworkName: 'Network A',
-  commission: 0.5713,
-  disclosedAt: T0 + 60_000,
+  it('signs differences', () => {
+    expect(signedRate(0.012)).toBe('+$0.0120')
+    expect(signedRate(-0.0031)).toBe('-$0.0031')
+    expect(signedRate(0)).toBe('$0.0000')
+    expect(signedPercent(-12.49)).toBe('-12.5%')
+    expect(signedPercent(3)).toBe('+3.0%')
+  })
 })
-const REJECTED = record({
-  clickId: 'clk_rejected',
-  routedAt: T0,
-  routedNetworkId: 'net-b',
-  routedNetworkName: 'Network B',
-  disclosedAt: T0,
-  errorCode: 'MERCHANT_NOT_SUPPORTED',
+
+describe('duration', () => {
+  it('formats minutes and seconds, then hours and minutes', () => {
+    expect(duration(0)).toBe('0m 00s')
+    expect(duration(14 * 60_000 + 3_000)).toBe('14m 03s')
+    expect(duration(64 * 60_000)).toBe('1h 04m')
+  })
+
+  it('never goes negative', () => {
+    expect(duration(-5_000)).toBe('0m 00s')
+  })
 })
-const LAPSED = record({ clickId: 'clk_lapsed' })
-const LIVE = record({ clickId: 'clk_live', issuedAt: T0 + 110_000, expiresAt: T0 + 230_000 })
 
-const ALL = [SETTLED, REJECTED, LAPSED, LIVE]
-const NOW = T0 + 121_000
-
-describe('applyFilters', () => {
-  it('returns everything when nothing is filtered', () => {
-    expect(applyFilters(ALL, NO_FILTERS, NOW)).toHaveLength(4)
-    expect(filtersAreEmpty(NO_FILTERS)).toBe(true)
+describe('server timestamps', () => {
+  it('parses ISO strings and reads a missing zone as UTC', () => {
+    expect(parseIso('2026-09-28T12:00:00.000Z')).toBe(Date.UTC(2026, 8, 28, 12))
+    // The host always sends a Z; if one ever went missing, local time would be the wrong guess.
+    expect(parseIso('2026-09-28T12:00:00')).toBe(Date.UTC(2026, 8, 28, 12))
+    expect(parseIso('2026-09-28T13:00:00+01:00')).toBe(Date.UTC(2026, 8, 28, 12))
   })
 
-  it('filters by routed network', () => {
-    const rows = applyFilters(ALL, { ...NO_FILTERS, networkId: 'net-a' }, NOW)
-    expect(rows.map((r) => r.clickId)).toEqual(['clk_settled'])
+  it('measures elapsed time between two server timestamps, never negative', () => {
+    expect(elapsedMs('2026-09-28T11:59:00.000Z', NOW)).toBe(60_000)
+    expect(elapsedMs(NOW, '2026-09-28T11:59:00.000Z')).toBe(0)
   })
 
-  it('filters by derived state, including states never stored', () => {
-    expect(applyFilters(ALL, { ...NO_FILTERS, state: 'settled' }, NOW).map((r) => r.clickId)).toEqual([
-      'clk_settled',
-    ])
-    // `expired` is derived from a timestamp, not stored anywhere.
-    expect(applyFilters(ALL, { ...NO_FILTERS, state: 'expired' }, NOW).map((r) => r.clickId)).toEqual([
-      'clk_lapsed',
-    ])
-    expect(applyFilters(ALL, { ...NO_FILTERS, state: 'issued' }, NOW).map((r) => r.clickId)).toEqual([
-      'clk_live',
-    ])
+  it('renders ages in seconds up to two minutes, then as a duration', () => {
+    expect(ago('2026-09-28T11:59:56.000Z', NOW)).toBe('4s ago')
+    expect(ago('2026-09-28T11:58:59.000Z', NOW)).toBe('61s ago')
+    expect(ago('2026-09-28T11:56:50.000Z', NOW)).toBe('3m 10s ago')
+    expect(ago('2026-09-28T10:56:00.000Z', NOW)).toBe('1h 04m ago')
+    expect(ago(null, NOW)).toBe('never')
   })
 
-  it('matches a merchant by name substring, case-insensitively, or by exact id', () => {
-    expect(applyFilters(ALL, { ...NO_FILTERS, merchant: 'best' }, NOW).map((r) => r.clickId)).toEqual([
-      'clk_settled',
-    ])
-    expect(applyFilters(ALL, { ...NO_FILTERS, merchant: '10' }, NOW).map((r) => r.clickId)).toEqual([
-      'clk_settled',
-    ])
-    // An id match is exact: "4" must not match merchant 42.
-    expect(applyFilters(ALL, { ...NO_FILTERS, merchant: '4' }, NOW)).toHaveLength(0)
+  it('renders time until a retry', () => {
+    expect(until('2026-09-28T12:00:04.000Z', NOW)).toBe('in 4s')
+    expect(until('2026-09-28T11:59:00.000Z', NOW)).toBe('now')
   })
 
-  it('treats "errors only" as failed, not as carrying an error code', () => {
-    const rows = applyFilters(ALL, { ...NO_FILTERS, errorsOnly: true }, NOW)
-    // The lapsed click has NO errorCode but is a failure; the live click has none and is not.
-    expect(rows.map((r) => r.clickId).sort()).toEqual(['clk_lapsed', 'clk_rejected'])
+  it('formats UTC clock times and date-times', () => {
+    expect(utcTime(NOW)).toBe('12:00:00')
+    expect(utcTime(Date.UTC(2026, 8, 28, 7, 5, 9))).toBe('07:05:09')
+    expect(utcDateTime(NOW)).toBe('2026-09-28 12:00')
   })
+})
 
-  it('applies every filter together', () => {
-    const rows = applyFilters(
-      ALL,
-      { networkId: 'net-b', state: 'rejected', merchant: 'Target', errorsOnly: true },
-      NOW,
-    )
-    expect(rows.map((r) => r.clickId)).toEqual(['clk_rejected'])
+describe('count and shortClickId', () => {
+  it('groups thousands and keeps the tail of a click id', () => {
+    expect(count(12_345)).toBe('12,345')
+    expect(shortClickId('clk_0123456789abcdef')).toBe('abcdef')
   })
 })
 
 describe('nextSort', () => {
   it('cycles off, ascending, descending, off', () => {
-    const first = nextSort(NO_SORT, 'issued')
-    expect(first).toEqual({ key: 'issued', dir: 1 })
-    const second = nextSort(first, 'issued')
-    expect(second).toEqual({ key: 'issued', dir: -1 })
-    expect(nextSort(second, 'issued')).toEqual(NO_SORT)
+    const first = nextSort(NO_SORT, 'issuedAt')
+    expect(first).toEqual({ key: 'issuedAt', dir: 1 })
+    const second = nextSort(first, 'issuedAt')
+    expect(second).toEqual({ key: 'issuedAt', dir: -1 })
+    expect(nextSort(second, 'issuedAt')).toEqual(NO_SORT)
   })
 
   it('resets to ascending when the column changes', () => {
-    expect(nextSort({ key: 'issued', dir: -1 }, 'merchant')).toEqual({ key: 'merchant', dir: 1 })
-  })
-})
-
-describe('applySort', () => {
-  const accessors = {
-    commission: (click: ClickRecord) => click.commission,
-    merchant: (click: ClickRecord) => click.merchantName,
-  }
-  const fallback = (click: ClickRecord) => click.clickId
-
-  it('returns a copy in the original order when off', () => {
-    const rows = applySort(ALL, NO_SORT, accessors, fallback)
-    expect(rows.map((r) => r.clickId)).toEqual(ALL.map((r) => r.clickId))
-    expect(rows).not.toBe(ALL)
+    expect(nextSort({ key: 'issuedAt', dir: -1 }, 'merchantName')).toEqual({ key: 'merchantName', dir: 1 })
   })
 
-  it('sorts numbers numerically and puts nulls last ascending', () => {
-    const rows = applySort(ALL, { key: 'commission', dir: 1 }, accessors, fallback)
-    // The only click with a commission comes first; the three unknowns follow.
-    expect(rows[0]?.clickId).toBe('clk_settled')
-    expect(rows.slice(1).every((r) => r.commission === null)).toBe(true)
-  })
-
-  it('keeps nulls last when descending too, rather than hoisting unknowns to the top', () => {
-    const rows = applySort(ALL, { key: 'commission', dir: -1 }, accessors, fallback)
-    expect(rows[0]?.clickId).toBe('clk_settled')
-  })
-
-  it('compares strings with localeCompare', () => {
-    const rows = applySort(ALL, { key: 'merchant', dir: 1 }, accessors, fallback)
-    expect(rows[0]?.merchantName).toBe('Best Buy')
-  })
-
-  it('breaks ties deterministically, so the table does not flicker', () => {
-    // Three rows share merchantName "Target"; without a tie-break their order could change between
-    // renders, which reads as the table shuffling itself.
-    const once = applySort(ALL, { key: 'merchant', dir: 1 }, accessors, fallback).map((r) => r.clickId)
-    const twice = applySort([...ALL].reverse(), { key: 'merchant', dir: 1 }, accessors, fallback).map(
-      (r) => r.clickId,
-    )
-    expect(once).toEqual(twice)
-  })
-
-  it('refuses an unsortable key rather than silently returning unsorted rows', () => {
-    expect(() => applySort(ALL, { key: 'nope', dir: 1 }, accessors, fallback)).toThrow(/not sortable/)
-  })
-})
-
-describe('backoffAfterFailure', () => {
-  it('honors the server\'s retryAfterSeconds exactly', () => {
-    // Computed from the real bucket state, so waiting longer just wastes ration.
-    expect(backoffAfterFailure(1, 4)).toBe(4_000)
-    expect(backoffAfterFailure(9, 7)).toBe(7_000)
-  })
-
-  it('never waits less than a second, so a zero cannot hot-loop', () => {
-    expect(backoffAfterFailure(1, 0)).toBe(1_000)
-    expect(backoffAfterFailure(1, 0.2)).toBe(1_000)
-  })
-
-  it('backs off exponentially when the server said nothing', () => {
-    expect(backoffAfterFailure(1, undefined)).toBe(1_000)
-    expect(backoffAfterFailure(2, undefined)).toBe(2_000)
-    expect(backoffAfterFailure(3, undefined)).toBe(4_000)
-  })
-
-  it('caps the backoff so the loop always recovers on its own', () => {
-    expect(backoffAfterFailure(20, undefined)).toBe(MAX_BACKOFF_MS)
-  })
-
-  it('paces clicks at the sustained rate', () => {
-    // 20/min.
-    expect(CLICK_INTERVAL_MS).toBe(3_000)
-  })
-
-  it('rejects a nonsensical attempt count', () => {
-    expect(() => backoffAfterFailure(0, undefined)).toThrow(/at least 1/)
+  it('translates to list-endpoint parameters, sending nothing when off', () => {
+    expect(sortParams(NO_SORT)).toEqual({})
+    expect(sortParams({ key: 'commission', dir: 1 })).toEqual({ sortBy: 'commission', sortDirection: 'asc' })
+    expect(sortParams({ key: 'commission', dir: -1 })).toEqual({ sortBy: 'commission', sortDirection: 'desc' })
   })
 })

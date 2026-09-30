@@ -5,99 +5,132 @@ Each advertises a cost per click (CPC), but the amount it actually pays is delay
 changes over time. For each click, you choose one network and later see only what that network paid.
 Clicks are rationed, so learning from one choice means giving up the others.
 
-The supplied client already closes that loop by choosing randomly. Your challenge is to make its
-routing decisions better informed while turning it into a system a colleague could extend, operate,
-and trust.
+The supplied client closed that loop by choosing randomly, in a browser tab. This repository turns it into
+the beginnings of an optimization platform: a .NET 10 host runs the loop, keeps every observation, offers
+four routing models behind one interface, compares them honestly, and explains itself to an operator through
+the React UI. [`WALKTHROUGH.md`](WALKTHROUGH.md) is the walkthrough of the thinking.
 
 ## Start here
 
 | Document | What it gives you |
 | --- | --- |
-| [`CONCEPTS`](CONCEPTS.md) | **The problem space.** What affiliate routing is, what each concept means, and the three properties that make the decision hard. Start here. |
+| [`CONCEPTS`](CONCEPTS.md) | **The problem space.** What affiliate routing is, what each concept means, and the three properties that make the decision hard. |
 | [`BRIEF`](BRIEF.md) | **The ask.** What we are looking for, the shape of the challenge, and what to hand back. |
 | [`API`](API.md) | **The reference.** Five endpoints, the error codes, the rate limits, and a link to the complete machine-readable contract. |
-
-Read `CONCEPTS` and `BRIEF` before deciding what to build. Keep `API` nearby as a reference when you
-need an exact behavior or response shape.
+| [`WALKTHROUGH`](WALKTHROUGH.md) | **What was built and why.** Direction, models, evaluation design, operator experience, deviations, what was left out. |
+| [`ArchitectureSimple`](ArchitectureSimple.md) | **The architecture template** the .NET solution follows. |
+| [`backend/README`](backend/README.md) | **The host runbook.** Secrets, database, endpoints, tests, migrations, publish. |
 
 ## Getting it running
 
-Prerequisite: Node.js 22.13 or newer and npm 10 or newer.
+Prerequisites: .NET SDK 10.0, SQL Server LocalDB (or Docker, see the backend runbook), Node.js 22.13+ and npm 10+.
+
+### Everything at once: Aspire
+
+`backend/AffiliateOptimizer.AppHost` starts the simulator, the host and the operator UI together and opens a
+dashboard with their logs, traces, metrics and health:
 
 ```bash
-cd frontend
-cp .env.example .env    # paste in the credentials we sent you
-npm install
-npm run dev             # http://localhost:5174
+cd backend
+dotnet run --project AffiliateOptimizer.AppHost
 ```
 
-Three values in `.env`, all issued to you out of band:
+The console prints the dashboard link (http://localhost:15000 with a one-time login token). The UI is at
+http://localhost:5174, the host at http://localhost:5175, the simulator at http://localhost:8787. The first run
+downloads the Aspire CLI bundle through `dnx`; nothing else to install, and Docker is not needed.
 
-| | |
-| --- | --- |
-| `APP_KEY` | Public half of your credential pair. |
-| `APP_SECRET` | Private half. Both go on every API call as headers. |
-| `SERVER_URL` | The Affiliate Service you are routing against. |
-
-If any are missing the client says so on screen rather than failing quietly. Vite only reads
-`.env` at startup, so restart the dev server after editing it.
+Real credentials instead of the simulator, stored once in the AppHost's user secrets (never committed):
 
 ```bash
-npm test               # unit tests
-npm run typecheck
-npm run test:e2e       # drives the client against the real API
-npm run api:generate   # regenerate the typed client from openapi.json
+cd backend/AffiliateOptimizer.AppHost
+dotnet user-secrets set "AffiliateService:UseSimulator" "false"
+dotnet user-secrets set "Parameters:affiliate-server-url" "<SERVER_URL>"
+dotnet user-secrets set "Parameters:affiliate-app-key" "<APP_KEY>"
+dotnet user-secrets set "Parameters:affiliate-app-secret" "<APP_SECRET>"
 ```
 
-`api:generate` writes `src/api/schema.d.ts`. You only need it if you change the specification,
-which you should not need to do. [`API`](API.md) is the human-readable guide and
-[`openapi.json`](openapi.json) is the complete machine-readable contract.
+Run one host per credential pair: never scale `web` in the AppHost. If your shell still exports `SERVER_URL`,
+`APP_KEY` or `APP_SECRET` from the old workflow, unset them: they would override the AppHost's wiring.
 
-Port 5174 is pinned so it does not collide with anything else we run locally, and the server
-permits that origin.
+### Step by step (no Aspire)
+
+1. Give the host the three credentials you were sent (never committed):
+
+   ```bash
+   cd backend/AffiliateOptimizer.Web
+   dotnet user-secrets set "AffiliateService:ServerUrl" "<SERVER_URL>"
+   dotnet user-secrets set "AffiliateService:AppKey" "<APP_KEY>"
+   dotnet user-secrets set "AffiliateService:AppSecret" "<APP_SECRET>"
+   ```
+
+   The environment variables `SERVER_URL`, `APP_KEY` and `APP_SECRET` work as well.
+
+2. Start the host (applies migrations, seeds the operator account, starts the loops):
+
+   ```bash
+   cd backend
+   dotnet run --project AffiliateOptimizer.Web
+   ```
+
+3. Start the operator UI:
+
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+   Open http://localhost:5174 and sign in as `operator@local` / `operator-dev-password` (the Development
+   default; see the backend runbook to change it). Pick one or more models, tick "interleave" to compare them
+   on the same traffic, and start a run.
+
+Single-process alternative: `npm run build` in `frontend/` once, then the host serves the UI itself at
+http://localhost:5175.
+
+### No credentials? Use the simulator
+
+`tools/affiliate-simulator` is a local stand-in for the Affiliate Service that implements the five endpoints
+with the behaviours `API.md` describes and an invented, drifting world:
+
+```bash
+node tools/affiliate-simulator/server.mjs
+```
+
+then point the host at it: `SERVER_URL=http://localhost:8787 APP_KEY=ak_local APP_SECRET=as_local`.
+`DISCLOSURE_DELAY_MS=8000` makes commissions arrive faster than the real one-minute delay;
+`GET /_simulator/truth` reveals the hidden means so you can check what a model learned. Its numbers mean
+nothing outside this repository.
+
+## Tests
+
+```bash
+cd backend && dotnet test          # 220 tests: handlers, validators, entities, repositories, client, controllers, loops, composition
+cd frontend && npm test            # unit tests of the UI helpers and the API client
+cd frontend && npm run test:e2e    # drives the UI against a running host (needs credentials or the simulator)
+```
+
+`npm run test:e2e` starts the host and the UI itself, or reuses them when the AppHost is already running.
 
 ## Where things are
 
-The client does the whole loop end to end: authenticates, fetches the merchant and network
-lists, pulls a click, picks a network, routes it, polls for commissions as they are disclosed,
-and shows them with a running total. Rate limits, paging, and safe recovery after an ambiguous
-route response are handled, so you should not need to revisit them unless you want to.
-
-It is naive at exactly one point: the **optimization model** choosing where a click goes. The
-shipped optimization model filters the networks down to those covering the click's merchant, then
-picks one uniformly at random.
-
 ```
-frontend/src/
-  api/
-    schema.d.ts    generated from openapi.json, do not hand-edit
-    client.ts      typed HTTP client. One call in, one response or one thrown error out.
-    config.ts      reads .env, fails loudly when something is missing
-    errors.ts      the server's error codes, as types
-  loop/
-    runLoop.ts     two loops: issue-and-route, and poll-for-commissions
-    clickLog.ts    the client's own record of the run. State is derived, never stored.
-    backoff.ts     pacing and retry arithmetic, pure
-  models/
-    random.ts      >>> the random optimization model. The naive bit, and the interesting file. <<<
-  views/           the example UI
-  lib/             formatting, filtering, sorting
+backend/            the .NET solution (see backend/README.md)
+  AffiliateOptimizer.Domain/Features/   one folder per use case: Runs, Clicks, Commissions, Networks,
+                                        Evaluation, Health, Models, LoopEvents
+  AffiliateOptimizer.Domain/Common/Optimization/Models/   >>> the models: random, advertised-greedy,
+                                                              epsilon-greedy, sliding-window-ucb <<<
+frontend/           the React operator UI; src/api/operator.ts is its only I/O
+tools/affiliate-simulator/   the local stand-in for the Affiliate Service
 ```
 
-One thing to know before you touch the loop: a route request may reach the server even when its
-response does not reach the browser. Repeating the identical click/network request is safe because
-the server replays the original accepted or rejected outcome. The commission feed also carries the
-routing fields needed to reconcile an uncertain local row. [`API`](API.md) has the exact shapes.
+The host calls the Affiliate Service; the browser never sees the credentials. Every API response carries
+`serverNow`, and the UI derives nothing from the browser clock.
 
 ## Leaving it running
 
-Network behavior shifts over time, so a longer run gives a richer picture, though a short run is
-enough to see the shape of the problem. Browsers throttle timers in background tabs, so a hidden tab
-may collect fewer clicks than you expect.
+Network behavior shifts over time, so a longer run gives a richer picture. The loop no longer lives in a tab:
+close the browser, come back later, the run is still going, and a host restart continues it.
 
 ## Handing it back
 
-The deliverables are your committed repo and a walkthrough of your thinking. The format of that
-walkthrough is yours; [`BRIEF`](BRIEF.md#what-to-hand-back) has the details.
-
-Questions are welcome at any point, so please reach out.
+The deliverables are this repository and [`WALKTHROUGH.md`](WALKTHROUGH.md). Questions are welcome at any point.

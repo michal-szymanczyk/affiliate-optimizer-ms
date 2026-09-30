@@ -1,10 +1,11 @@
 /**
- * Sorting for the feed table.
+ * Sort state for the feed table.
  *
  * Clicking a header cycles off → ascending → descending → off; switching header resets to
- * ascending. Nulls sort last ascending, which is what "no commission yet" should do — a click still
- * awaiting disclosure is not worth less than one that earned nothing, it is simply unknown.
+ * ascending. The sorting itself happens on the server now (`sortBy` / `sortDirection` on the list
+ * endpoints), so this module only owns the cycle and its translation to query parameters.
  */
+import type { SortDirection } from '../api/types'
 
 export interface SortState {
   key: string | null
@@ -20,45 +21,11 @@ export function nextSort(current: SortState, key: string): SortState {
   return { key, dir: 1 }
 }
 
-type Sortable = string | number | null | undefined
-
 /**
- * Sorts a copy. Strings compare with `localeCompare`, numbers numerically, nulls last ascending.
- *
- * `fallback` breaks ties so the order is total — without it, two rows with equal commissions would
- * swap places on every re-render, which reads as the table flickering.
+ * The list-endpoint parameters for a sort state. "Off" sends nothing, which lets the server apply
+ * its own default (newest first for clicks and runs).
  */
-export function applySort<T>(
-  rows: readonly T[],
-  sort: SortState,
-  accessors: Record<string, (row: T) => Sortable>,
-  fallback: (row: T) => Sortable,
-): T[] {
-  const { key, dir } = sort
-  if (key === null || dir === 0) return [...rows]
-
-  const accessor = accessors[key]
-  if (!accessor) {
-    throw new Error(
-      `applySort: "${key}" is not sortable. Sortable keys: ${Object.keys(accessors).join(', ')}.`,
-    )
-  }
-
-  return [...rows].sort((a, b) => {
-    const compared = compare(accessor(a), accessor(b), dir)
-    if (compared !== 0) return compared
-    return compare(fallback(a), fallback(b), dir)
-  })
-}
-
-function compare(a: Sortable, b: Sortable, dir: -1 | 1): number {
-  const aMissing = a === null || a === undefined
-  const bMissing = b === null || b === undefined
-  // Nulls last ASCENDING, which means last regardless of direction being flipped below.
-  if (aMissing && bMissing) return 0
-  if (aMissing) return 1
-  if (bMissing) return -1
-
-  if (typeof a === 'string' && typeof b === 'string') return a.localeCompare(b) * dir
-  return (Number(a) - Number(b)) * dir
+export function sortParams(sort: SortState): { sortBy?: string; sortDirection?: SortDirection } {
+  if (sort.key === null || sort.dir === 0) return {}
+  return { sortBy: sort.key, sortDirection: sort.dir === 1 ? 'asc' : 'desc' }
 }

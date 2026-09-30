@@ -1,0 +1,16 @@
+# SQL Server for machines without LocalDB. Point the host at it with:
+#   ConnectionStrings__App="Server=localhost,1433;Database=AffiliateOptimizer;User Id=sa;Password=Affiliate!Optimizer1;TrustServerCertificate=True"
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Affiliate!Optimizer1}"
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+
+volumes:
+  sqlserver-data: {}

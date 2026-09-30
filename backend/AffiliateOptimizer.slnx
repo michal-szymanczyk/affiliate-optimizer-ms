@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/Aspire/">
+    <Project Path="AffiliateOptimizer.AppHost/AffiliateOptimizer.AppHost.csproj" />
+    <Project Path="AffiliateOptimizer.ServiceDefaults/AffiliateOptimizer.ServiceDefaults.csproj" />
+  </Folder>
+  <Folder Name="/Common/">
+    <Project Path="Common/Common.Domain/Common.Domain.csproj" />
+    <Project Path="Common/Common.Repository/Common.Repository.csproj" />
+  </Folder>
+  <Folder Name="/Tests/">
+    <Project Path="Tests/AffiliateOptimizer.Tests.Unit/AffiliateOptimizer.Tests.Unit.csproj" />
+  </Folder>
+  <Project Path="AffiliateOptimizer.Domain/AffiliateOptimizer.Domain.csproj" />
+  <Project Path="AffiliateOptimizer.Repository/AffiliateOptimizer.Repository.csproj" />
+  <Project Path="AffiliateOptimizer.Web/AffiliateOptimizer.Web.csproj" />
+</Solution>

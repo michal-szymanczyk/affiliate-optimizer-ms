@@ -1,0 +1,2 @@
+# The operator session Playwright saves in e2e/global-setup.ts. A cookie, never committed.
+e2e/.auth/
