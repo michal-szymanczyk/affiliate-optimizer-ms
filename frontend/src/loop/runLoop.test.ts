@@ -10,6 +10,7 @@ import { AffiliateServiceClient, type Click, type CommissionFeed, type Network }
 import { ApiError, TransportError } from '../api/errors'
 import { ClickLog, clickState } from './clickLog'
 import { RunLoop } from './runLoop'
+import type { DecisionContext, OptimizationModel, SettledObservation } from '../models/model'
 import { randomOptimizationModel } from '../models/random'
 
 const T0 = 1_700_000_000_000
@@ -61,15 +62,68 @@ function stubClient(overrides: Partial<Record<keyof AffiliateServiceClient, unkn
   return { client: client as unknown as AffiliateServiceClient, routeCalls, feedCalls, raw: client }
 }
 
-function makeLoop(clientBundle: ReturnType<typeof stubClient>, log = new ClickLog()) {
+function makeLoop(
+  clientBundle: ReturnType<typeof stubClient>,
+  log = new ClickLog(),
+  models: readonly OptimizationModel[] = [randomOptimizationModel(() => 0)],
+) {
   const loop = new RunLoop({
     client: clientBundle.client,
-    optimizationModel: randomOptimizationModel(() => 0),
+    models,
     log,
     now: () => T0,
     onChange: () => {},
   })
   return { loop, log }
+}
+
+/** A model that routes where it is told to and keeps everything the loop tells it. */
+function probeModel(name: string, networkId = 'net-covers') {
+  const prepared: (readonly Network[])[] = []
+  const contexts: DecisionContext[] = []
+  const observations: SettledObservation[] = []
+  const model: OptimizationModel = {
+    name,
+    prepare: (networks) => {
+      prepared.push(networks)
+    },
+    choose: (context) => {
+      contexts.push(context)
+      return { networkId, rationale: `${name} says so`, exploratory: true }
+    },
+    observe: (observation) => {
+      observations.push(observation)
+    },
+  }
+  return { model, prepared, contexts, observations }
+}
+
+function settlement(clickId: string, commission: number) {
+  return {
+    clickId,
+    merchantId: 42,
+    routedNetworkId: 'net-covers',
+    routedAt: new Date(T0).toISOString(),
+    kind: 'settlement' as const,
+    state: 'settled' as const,
+    commission,
+    errorCode: null,
+    disclosedAt: new Date(T0 + 60_000).toISOString(),
+  }
+}
+
+function rejection(clickId: string) {
+  return {
+    clickId,
+    merchantId: 42,
+    routedNetworkId: 'net-misses',
+    routedAt: new Date(T0).toISOString(),
+    kind: 'rejection' as const,
+    state: 'rejected' as const,
+    commission: null,
+    errorCode: 'MERCHANT_NOT_SUPPORTED' as const,
+    disclosedAt: new Date(T0).toISOString(),
+  }
 }
 
 beforeEach(() => {
@@ -484,5 +538,248 @@ describe('pause and resume', () => {
 
     expect((bundle.raw.nextClick as ReturnType<typeof vi.fn>).mock.calls.length).toBe(issued)
     expect((bundle.raw.commissions as ReturnType<typeof vi.fn>).mock.calls.length).toBe(polled)
+  })
+})
+
+describe('optimization models', () => {
+  it('refuses to be built without a model, or with two models sharing a name', () => {
+    const { client } = stubClient()
+    const base = { client, log: new ClickLog(), onChange: () => {} }
+
+    expect(() => new RunLoop({ ...base, models: [] })).toThrow(/at least one optimization model/)
+    // The name is what a click records about who decided it, so it has to identify one model.
+    expect(
+      () => new RunLoop({ ...base, models: [randomOptimizationModel(), randomOptimizationModel()] }),
+    ).toThrow(/both named "random"/)
+  })
+
+  it('shows every model the field before asking any of them to decide', async () => {
+    const bundle = stubClient()
+    const first = probeModel('first')
+    const second = probeModel('second')
+    const { loop } = makeLoop(bundle, new ClickLog(), [first.model, second.model])
+
+    await loop.start()
+
+    expect(first.prepared).toEqual([NETWORKS])
+    expect(second.prepared).toEqual([NETWORKS])
+    expect(first.contexts).toHaveLength(0)
+    loop.stop()
+  })
+
+  it('prepares nothing and issues nothing when stopped while the reference data was in flight', async () => {
+    // React's StrictMode mounts, unmounts and mounts again, so a loop can be stopped before its
+    // own start() has finished.
+    let release!: (networks: Network[]) => void
+    const bundle = stubClient({
+      networks: vi.fn(
+        () =>
+          new Promise<Network[]>((resolve) => {
+            release = resolve
+          }),
+      ),
+    })
+    const probe = probeModel('probe')
+    const { loop } = makeLoop(bundle, new ClickLog(), [probe.model])
+
+    const starting = loop.start()
+    loop.stop()
+    release(NETWORKS)
+    await starting
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(probe.prepared).toHaveLength(0)
+    expect(loop.state.running).toBe(false)
+    expect(bundle.raw.nextClick).not.toHaveBeenCalled()
+  })
+
+  it('asks only the active model, and tells it the merchant, the field and the issue time', async () => {
+    const bundle = stubClient()
+    const active = probeModel('active')
+    const idle = probeModel('idle')
+    const { loop } = makeLoop(bundle, new ClickLog(), [active.model, idle.model])
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The click's own issue time on the server's clock, not the browser's: results are stamped by
+    // the server too, and a model that ages its knowledge needs both on one clock.
+    expect(active.contexts).toEqual([{ merchantId: 42, networks: NETWORKS, now: T0 }])
+    expect(idle.contexts).toHaveLength(0)
+    loop.stop()
+  })
+
+  it('records with each click which model decided it and why', async () => {
+    const bundle = stubClient()
+    const probe = probeModel('probe')
+    const { loop, log } = makeLoop(bundle, new ClickLog(), [probe.model])
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(log.get('clk_1')?.decision).toEqual({
+      modelName: 'probe',
+      rationale: 'probe says so',
+      exploratory: true,
+    })
+    loop.stop()
+  })
+
+  it('records null for exploratory when the model has no notion of a favorite', async () => {
+    const bundle = stubClient()
+    const { loop, log } = makeLoop(bundle)
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(log.get('clk_1')?.decision).toEqual({
+      modelName: 'random',
+      rationale: 'random among 1 networks covering merchant 42',
+      exploratory: null,
+    })
+    loop.stop()
+  })
+
+  it('switches which model decides from the next click on, and refuses an unknown name', async () => {
+    const bundle = stubClient()
+    const first = probeModel('first')
+    const second = probeModel('second')
+    const { loop, log } = makeLoop(bundle, new ClickLog(), [first.model, second.model])
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(loop.state.activeModelName).toBe('first')
+
+    loop.selectModel('second')
+    expect(loop.state.activeModelName).toBe('second')
+    await vi.advanceTimersByTimeAsync(3_000)
+
+    // The earlier click keeps the model it was decided by: that is a fact about the click.
+    expect(log.get('clk_1')?.decision?.modelName).toBe('first')
+    expect(log.get('clk_2')?.decision?.modelName).toBe('second')
+    expect(() => loop.selectModel('nope')).toThrow(/no optimization model is named "nope"/)
+    loop.stop()
+  })
+
+  it('tells every model about each settled commission exactly once, even when the feed is re-read', async () => {
+    let calls = 0
+    const bundle = stubClient({
+      commissions: vi.fn(async (cursor: string | null) => {
+        calls += 1
+        if (calls === 1) return { commissions: [settlement('clk_1', 0.5)], nextCursor: 'poisoned' }
+        if (cursor === 'poisoned') throw new ApiError(400, 'INVALID_CURSOR', 'bad cursor')
+        // The restarted feed hands the first row over again, along with a new one.
+        return { commissions: [settlement('clk_1', 0.5), settlement('clk_2', 0.7)], nextCursor: 'fresh' }
+      }),
+    })
+    const deciding = probeModel('deciding')
+    const watching = probeModel('watching')
+    const { loop } = makeLoop(bundle, new ClickLog(), [deciding.model, watching.model])
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(2_000)
+    await vi.advanceTimersByTimeAsync(2_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    // A model that learned from the same commission twice would be twice as sure as it should be.
+    expect(deciding.observations.map((observation) => observation.clickId)).toEqual(['clk_1', 'clk_2'])
+    // The model that is not deciding learns too, so it is not stale when it is switched to.
+    expect(watching.observations.map((observation) => observation.clickId)).toEqual(['clk_1', 'clk_2'])
+    expect(deciding.observations[0]).toEqual({
+      clickId: 'clk_1',
+      networkId: 'net-covers',
+      commission: 0.5,
+      routedAt: T0,
+      disclosedAt: T0 + 60_000,
+    })
+    loop.stop()
+  })
+
+  it('passes on commissions for clicks this page never issued, and never a rejection', async () => {
+    // The reload case. What a network paid is worth knowing whoever routed the click, and replaying
+    // the feed is how a model gets its knowledge back after a reload. A rejection carries no
+    // commission: it says the routing was a mistake, not what the network pays.
+    const bundle = stubClient({
+      commissions: vi.fn(async () => ({
+        commissions: [settlement('clk_from_a_previous_page_load', 0.31), rejection('clk_rejected_before')],
+        nextCursor: 'cursor-2',
+      })),
+    })
+    const probe = probeModel('probe')
+    const { loop } = makeLoop(bundle, new ClickLog(), [probe.model])
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(2_000)
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(probe.observations.map((observation) => observation.clickId)).toEqual([
+      'clk_from_a_previous_page_load',
+    ])
+    // Two rows the log has no click for, each counted once however often the feed repeats them.
+    expect(loop.state.skippedDisclosures).toBe(2)
+    loop.stop()
+  })
+
+  it('surfaces a model that throws while learning, without starving the others or the feed', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const commissions = vi.fn(async (_cursor: string | null) => ({
+      commissions: [settlement('clk_1', 0.5)],
+      nextCursor: 'cursor-2',
+    }))
+    const bundle = stubClient({ commissions })
+    const broken: OptimizationModel = {
+      name: 'broken',
+      choose: () => ({ networkId: 'net-covers', rationale: 'always the same' }),
+      observe: () => {
+        throw new Error('the estimate became NaN')
+      },
+    }
+    const healthy = probeModel('healthy')
+    const { loop } = makeLoop(bundle, new ClickLog(), [broken, healthy.model])
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(loop.state.feedError?.code).toBe('MODEL_ERROR')
+    expect(loop.state.feedError?.message).toMatch(/"broken".*the estimate became NaN/)
+    expect(healthy.observations).toHaveLength(1)
+
+    // The cursor still advanced. Had the exception escaped the poll, the same row would be read
+    // into the same exception on every turn.
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(commissions.mock.calls.map(([cursor]) => cursor)).toEqual([null, 'cursor-2'])
+    // And a successful poll does not quietly clear it: nothing the server did fixed the model.
+    expect(loop.state.feedError?.code).toBe('MODEL_ERROR')
+
+    loop.dismissFeedError()
+    expect(loop.state.feedError).toBeNull()
+    loop.stop()
+    quiet.mockRestore()
+  })
+
+  it('surfaces a model that throws while choosing, leaves the click un-routed, and keeps issuing', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const bundle = stubClient()
+    const broken: OptimizationModel = {
+      name: 'broken',
+      choose: () => {
+        throw new Error('no belief for this network')
+      },
+    }
+    const { loop, log } = makeLoop(bundle, new ClickLog(), [broken])
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(loop.state.feedError?.code).toBe('MODEL_ERROR')
+    // Not routed on the model's behalf: the loop does not guess where a click should go.
+    expect(bundle.raw.route).not.toHaveBeenCalled()
+    expect(log.get('clk_1')).toMatchObject({ routedAt: null, decision: null })
+
+    // The click loop keeps its cadence instead of dying with the header still saying "running".
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(bundle.raw.nextClick).toHaveBeenCalledTimes(2)
+    loop.stop()
+    quiet.mockRestore()
   })
 })

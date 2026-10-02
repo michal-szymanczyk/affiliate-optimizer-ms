@@ -13,7 +13,7 @@
  */
 import type { AffiliateServiceClient, Click, Merchant, Network } from '../api/client'
 import { ApiError, TransportError, isRoutingRejectionCode } from '../api/errors'
-import type { OptimizationModel } from '../models/random'
+import type { OptimizationModel, RoutingDecision, SettledObservation } from '../models/model'
 import { ClickLog, type ClickRecord } from './clickLog'
 import { CLICK_INTERVAL_MS, POLL_INTERVAL_MS, backoffAfterFailure } from './backoff'
 
@@ -33,6 +33,8 @@ export interface LoopState {
   merchants: Merchant[]
   networks: Network[]
   feedError: FeedError | null
+  /** The optimization model deciding clicks right now. The others keep learning from the feed. */
+  activeModelName: string
   /**
    * Commissions the feed reported for clicks this page instance never issued -- almost always
    * because the page was reloaded and the server is replaying the credential pair's earlier
@@ -45,7 +47,11 @@ export interface LoopState {
 
 export interface RunLoopOptions {
   client: AffiliateServiceClient
-  optimizationModel: OptimizationModel
+  /**
+   * Every optimization model the operator can switch between; the first one starts active. All of
+   * them are told about every settled commission, so a model that is not deciding still learns.
+   */
+  models: readonly OptimizationModel[]
   log: ClickLog
   now?: () => number
   onChange: () => void
@@ -54,39 +60,66 @@ export interface RunLoopOptions {
 /** Matches the server's COMMISSION_FEED_PAGE_LIMIT. A full page means more is waiting. */
 const FEED_PAGE_LIMIT = 100
 const MAX_ROUTE_ATTEMPTS = 3
+/** Not a server code: an optimization model threw. See reportModelFailure. */
+const MODEL_ERROR = 'MODEL_ERROR'
 
 export class RunLoop {
   private readonly client: AffiliateServiceClient
-  private readonly optimizationModel: OptimizationModel
+  private readonly models: readonly OptimizationModel[]
   private readonly log: ClickLog
   private readonly now: () => number
   private readonly onChange: () => void
 
+  private active: OptimizationModel
   private merchantNames = new Map<number, string>()
   private networkNames = new Map<string, string>()
   private cursor: string | null = null
+  /**
+   * Click ids of feed rows already acted on. The feed hands a row over more than once when the
+   * cursor is restarted, and a model that learned from the same commission twice would be twice as
+   * sure of it as the evidence allows.
+   */
+  private readonly seenRows = new Set<string>()
   private clickTimer: ReturnType<typeof setTimeout> | null = null
   private pollTimer: ReturnType<typeof setTimeout> | null = null
   private clickFailures = 0
   private pollFailures = 0
   private stopped = false
 
-  readonly state: LoopState = {
-    startedAt: null,
-    running: false,
-    merchants: [],
-    networks: [],
-    feedError: null,
-    skippedDisclosures: 0,
-    revision: 0,
-  }
+  readonly state: LoopState
 
   constructor(options: RunLoopOptions) {
+    const [first] = options.models
+    if (!first) {
+      throw new Error(
+        'RunLoop: at least one optimization model is required. Without one the loop has nothing to ' +
+          'ask where a click should go.',
+      )
+    }
+    const names = options.models.map((model) => model.name)
+    const distinctNames = new Set(names)
+    if (distinctNames.size < names.length) {
+      throw new Error(
+        `RunLoop: two optimization models have the same name. Names must be unique.`,
+      )
+    }
+
     this.client = options.client
-    this.optimizationModel = options.optimizationModel
+    this.models = options.models
+    this.active = first
     this.log = options.log
     this.now = options.now ?? (() => Date.now())
     this.onChange = options.onChange
+    this.state = {
+      startedAt: null,
+      running: false,
+      merchants: [],
+      networks: [],
+      feedError: null,
+      activeModelName: first.name,
+      skippedDisclosures: 0,
+      revision: 0,
+    }
   }
 
   private changed(): void {
@@ -105,6 +138,9 @@ export class RunLoop {
       this.client.merchants(),
       this.client.networks(),
     ])
+    // stop() may have happened while the reference data was in flight: React's StrictMode mounts,
+    // unmounts and mounts again. A stopped loop must not go on to start anything.
+    if (this.stopped) return
 
     this.merchantNames = new Map(merchantList.map((entry) => [entry.merchantId, entry.name]))
     this.networkNames = new Map(networkList.map((entry) => [entry.id, entry.name]))
@@ -113,6 +149,15 @@ export class RunLoop {
     // The first authenticated call just happened, which is what anchors the run counter.
     this.state.startedAt = this.now()
     this.state.running = true
+
+    // Before either loop runs, so no model is asked to decide or learn about a field it has not seen.
+    for (const model of this.models) {
+      try {
+        model.prepare?.(networkList)
+      } catch (cause) {
+        this.reportModelFailure(model, 'preparing for the run', cause)
+      }
+    }
     this.changed()
 
     this.scheduleClick(0)
@@ -146,6 +191,25 @@ export class RunLoop {
     this.pollTimer = null
   }
 
+  /**
+   * Changes which model decides, from the next click on.
+   *
+   * Clicks already decided keep the model they were recorded with, and every model goes on
+   * receiving results, so switching back later does not find a model that stopped learning.
+   */
+  selectModel(name: string): void {
+    const model = this.models.find((candidate) => candidate.name === name)
+    if (!model) {
+      throw new Error(
+        `RunLoop: no optimization model is named "${name}". Available: ` +
+          `${this.models.map((candidate) => candidate.name).join(', ')}.`,
+      )
+    }
+    this.active = model
+    this.state.activeModelName = model.name
+    this.changed()
+  }
+
   dismissFeedError(): void {
     if (this.state.feedError?.dismissible === false) return
     this.state.feedError = null
@@ -174,9 +238,39 @@ export class RunLoop {
   }
 
   private clearRecoverableFeedError(): void {
-    if (this.state.feedError !== null && this.state.feedError.dismissible) {
+    const error = this.state.feedError
+    // A model failure is not something a successful server call recovers from, so it stays on
+    // screen until the operator dismisses it.
+    if (error !== null && error.dismissible && error.code !== MODEL_ERROR) {
       this.state.feedError = null
       this.changed()
+    }
+  }
+
+  /**
+   * Handler for optimization model errors.
+   */
+  private reportModelFailure(model: OptimizationModel, doing: string, cause: unknown): void {
+    console.error(`Optimization model "${model.name}" failed while ${doing}`, cause)
+    this.state.feedError = {
+      code: MODEL_ERROR,
+      message: `The optimization model "${model.name}" failed while ${doing}: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+      until: this.now(),
+      dismissible: true,
+    }
+    this.changed()
+  }
+
+  /** Tells every model, deciding or not, what one settled click paid. */
+  private deliver(observation: SettledObservation): void {
+    for (const model of this.models) {
+      try {
+        model.observe?.(observation)
+      } catch (cause) {
+        this.reportModelFailure(model, 'learning from a commission', cause)
+      }
     }
   }
 
@@ -232,16 +326,40 @@ export class RunLoop {
       commission: null,
       disclosedAt: null,
       errorCode: null,
+      decision: null,
     }
     this.log.append(record)
     this.changed()
 
-    const decision = this.optimizationModel.choose(click.merchantId, this.state.networks)
+    // Captured once: the operator may switch models while the routing call below is in flight.
+    const model = this.active
+    let decision: RoutingDecision | null
+    try {
+      decision = model.choose({
+        merchantId: click.merchantId,
+        networks: this.state.networks,
+        // The click's own issue time, on the server's clock.
+        now: record.issuedAt,
+      })
+    } catch (cause) {
+      // Leave the click un-routed rather than guess on the model's behalf. It lapses, visibly.
+      this.reportModelFailure(model, 'choosing a network', cause)
+      this.scheduleClick(CLICK_INTERVAL_MS)
+      return
+    }
     if (decision === null) {
       // Nothing covers this merchant. Let it lapse rather than spend it on a certain rejection.
       this.scheduleClick(CLICK_INTERVAL_MS)
       return
     }
+    // Recorded before routing, so the reason survives whatever the routing call does next.
+    this.log.update(click.clickId, {
+      decision: {
+        modelName: model.name,
+        rationale: decision.rationale,
+        exploratory: decision.exploratory ?? null,
+      },
+    })
 
     try {
       const acknowledgment = await this.routeWithRecovery(click.clickId, decision.networkId)
@@ -295,19 +413,39 @@ export class RunLoop {
       this.pollFailures = 0
 
       for (const row of feed.commissions) {
+        const routedAt = Date.parse(row.routedAt)
+        const disclosedAt = Date.parse(row.disclosedAt)
         // Routing fields make the feed a recovery path. If POST /route completed but every
         // response was lost, this event still repairs the local row before applying its outcome.
         const folded = this.log.update(row.clickId, {
-          routedAt: Date.parse(row.routedAt),
+          routedAt,
           routedNetworkId: row.routedNetworkId,
           routedNetworkName: this.networkNames.get(row.routedNetworkId) ?? row.routedNetworkId,
           commission: row.commission,
           errorCode: row.errorCode,
-          disclosedAt: Date.parse(row.disclosedAt),
+          disclosedAt,
         })
+
+        // Folding a row into the log twice changes nothing. Counting it twice, or teaching a model
+        // from it twice, does. So everything below happens on first sight only.
+        if (this.seenRows.has(row.clickId)) continue
+        this.seenRows.add(row.clickId)
+
         // Not an error: the feed is scoped to the credential pair, not to this page load, so a
         // reload replays commissions for clicks a previous instance issued. See ClickLog.update.
         if (folded === null) this.state.skippedDisclosures += 1
+
+        // Delivered whether or not this page issued the click. What a network paid a minute ago is
+        // worth knowing either way, and it is how a model's knowledge survives a reload.
+        if (row.kind === 'settlement') {
+          this.deliver({
+            clickId: row.clickId,
+            networkId: row.routedNetworkId,
+            commission: row.commission,
+            routedAt,
+            disclosedAt,
+          })
+        }
       }
 
       // Stored after EVERY poll, including empty ones. It comes back unchanged when nothing is new,

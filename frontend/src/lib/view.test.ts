@@ -27,6 +27,7 @@ function record(overrides: Partial<ClickRecord> = {}): ClickRecord {
     commission: null,
     disclosedAt: null,
     errorCode: null,
+    decision: null,
     ...overrides,
   }
 }
