@@ -7,7 +7,7 @@ export interface Distribution {
 export interface DistributionBounds {
   xMin: number
   xMax: number
-  /** The tallest density peak plus headroom, for the view that compares densities on one scale. */
+  /** The tallest density peak plus headroom: every curve is drawn on this one density scale. */
   yMax: number
 }
 

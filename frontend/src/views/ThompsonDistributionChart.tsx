@@ -25,13 +25,6 @@ const TOP = 30
 const BOTTOM = HEIGHT - 54
 const LEFT = 62
 const RIGHT = 20
-/** Room left above a curve drawn to its own peak, as a multiple of that peak. */
-const PEAK_HEADROOM = 1.1
-const OWN_PEAK_TICKS = [
-  { value: 0, label: '0' },
-  { value: 0.5, label: '50%' },
-  { value: 1, label: '100%' },
-]
 
 function densityLabel(value: number): string {
   if (value === 0) return '0'
@@ -58,28 +51,21 @@ function describeDistribution({ network, belief }: DistributionRow): string {
 /**
  * The distributions the Thompson model draws from, one curve per network.
  *
- * What matters for a draw is where a curve sits and how wide it is, so by default every curve is
- * drawn to its own peak. On one shared density scale a network the model is sure of stands many
- * times taller than one it doubts, and every other curve is flattened into the axis. That view is
- * still one click away, for when the heights themselves are the question.
+ * Every curve is drawn on one density scale, so the heights compare: a network the model is sure
+ * of stands many times taller than one it doubts.
  *
- * Which curves are hidden and which scale is on belong to the panel, so they outlive this chart
- * being closed and opened again.
+ * Which curves are hidden belongs to the panel, so it outlives this chart being closed and opened
+ * again.
  */
 export function ThompsonDistributionChart({
   rows,
   hidden,
   onToggle,
-  sharedDensity,
-  onSharedDensity,
 }: {
   rows: readonly DistributionRow[]
   /** Ids of the networks whose curves are switched off. */
   hidden: ReadonlySet<string>
   onToggle: (networkId: string) => void
-  /** One density scale for every curve, rather than each drawn to its own peak. */
-  sharedDensity: boolean
-  onSharedDensity: (shared: boolean) => void
 }) {
   const id = useId()
   const container = useRef<HTMLDivElement>(null)
@@ -126,10 +112,8 @@ export function ThompsonDistributionChart({
 
   const plotWidth = width - LEFT - RIGHT
   const xTicks = bounds ? niceTicks(bounds.xMin, bounds.xMax, Math.max(2, Math.floor(plotWidth / 110))) : null
-  const yTop = sharedDensity ? (bounds?.yMax ?? 1) : PEAK_HEADROOM
-  const yTicks = sharedDensity
-    ? niceTicks(0, yTop, 4).values.map((value) => ({ value, label: densityLabel(value) }))
-    : OWN_PEAK_TICKS
+  const yTop = bounds?.yMax ?? 1
+  const yTicks = niceTicks(0, yTop, 4).values
   const xAt = (value: number) => px(LEFT +
     (value - (bounds?.xMin ?? 0)) / ((bounds?.xMax ?? 1) - (bounds?.xMin ?? 0)) * plotWidth)
   const yAt = (value: number) => px(BOTTOM - value / yTop * (BOTTOM - TOP))
@@ -141,24 +125,13 @@ export function ThompsonDistributionChart({
       <figcaption>
         <div className="belief-chart-header">
           <h4 id={`${id}-heading`}>Thompson distributions</h4>
-          <label className="belief-chart-option">
-            <input
-              type="checkbox"
-              checked={sharedDensity}
-              onChange={(event) => onSharedDensity(event.target.checked)}
-            />
-            Compare densities on one scale
-          </label>
           <span className="belief-chart-note">{visible.length} of {valid.length} shown · axes scale automatically</span>
         </div>
         <p id={`${id}-description`} className="belief-chart-note">
           Plausible CPC draws from the current normal distributions. Pending results narrow the sampling
-          uncertainty (σ); the table’s ± shows belief uncertainty before that adjustment.{' '}
-          {sharedDensity
-            ? 'Curve height is probability density, not the chance of winning.'
-            : 'Each curve is drawn to its own peak, so read where it sits and how wide it is: its height says ' +
-              'nothing about the chance of winning.'}{' '}
-          Only networks covering a click’s merchant compete for it.
+          uncertainty (σ); the table’s ± shows belief uncertainty before that adjustment. Curve height is
+          probability density, not the chance of winning. Only networks covering a click’s merchant compete
+          for it.
         </p>
       </figcaption>
       <div ref={container} className="belief-chart-plot">
@@ -175,14 +148,12 @@ export function ThompsonDistributionChart({
                 <rect x={LEFT} y={TOP} width={plotWidth} height={BOTTOM - TOP} />
               </clipPath>
             </defs>
-            <text x={LEFT} y={16} className="belief-axis-label">
-              {sharedDensity ? 'Probability density' : 'Density (share of own peak)'}
-            </text>
-            {yTicks.map(({ value, label }) => (
+            <text x={LEFT} y={16} className="belief-axis-label">Probability density</text>
+            {yTicks.map((value) => (
               <g key={value}>
                 <line x1={LEFT} x2={width - RIGHT} y1={yAt(value)} y2={yAt(value)} className="belief-grid-line" />
                 <text x={LEFT - 10} y={yAt(value) + 4} textAnchor="end" className="belief-tick-label">
-                  {label}
+                  {densityLabel(value)}
                 </text>
               </g>
             ))}
@@ -200,12 +171,10 @@ export function ThompsonDistributionChart({
               {visible.map((row) => {
                 const style = styles.get(row.network.id)
                 const point = isPointDistribution(row)
-                const peak = normalDensity(row.mean, row)
-                const height = sharedDensity ? 1 : 1 / peak
                 const path = distributionPoints(row)
-                  .map(({ x, y }, index) => `${index === 0 ? 'M' : 'L'}${xAt(x)},${yAt(y * height)}`)
+                  .map(({ x, y }, index) => `${index === 0 ? 'M' : 'L'}${xAt(x)},${yAt(y)}`)
                   .join(' ')
-                const peakY = point ? TOP + 3 : yAt(peak * height)
+                const peakY = point ? TOP + 3 : yAt(normalDensity(row.mean, row))
                 return (
                   <g
                     key={row.network.id}

@@ -51,9 +51,8 @@ export function BeliefsPanel({
   now: number
 }) {
   const [showDistributions, setShowDistributions] = useState(false)
-  // The chart's settings live here: the chart is unmounted while closed and would forget them.
+  // Kept here: the chart is unmounted while closed and would forget which curves were hidden.
   const [hiddenCurves, setHiddenCurves] = useState<ReadonlySet<string>>(() => new Set())
-  const [sharedDensity, setSharedDensity] = useState(false)
   const chartId = useId()
   const byId = new Map(networks.map((network) => [network.id, network]))
   const rows = beliefs
@@ -94,13 +93,7 @@ export function BeliefsPanel({
 
       <div id={chartId}>
         {showDistributions ? (
-          <ThompsonDistributionChart
-            rows={rows}
-            hidden={hiddenCurves}
-            onToggle={toggleCurve}
-            sharedDensity={sharedDensity}
-            onSharedDensity={setSharedDensity}
-          />
+          <ThompsonDistributionChart rows={rows} hidden={hiddenCurves} onToggle={toggleCurve} />
         ) : null}
       </div>
 

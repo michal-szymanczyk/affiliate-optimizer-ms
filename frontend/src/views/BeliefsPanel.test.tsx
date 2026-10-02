@@ -57,21 +57,18 @@ describe('optional Thompson distributions', () => {
     expect(container.querySelectorAll('.belief-curve')).toHaveLength(1)
   })
 
-  it('remembers which curves were hidden, and the scale, while the chart is closed', () => {
+  it('remembers which curves were hidden while the chart is closed', () => {
     render(<BeliefsPanel {...props} />)
     showChart()
     fireEvent.click(screen.getByRole('button', { name: 'Alpha distribution' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Compare densities on one scale' }))
     fireEvent.click(screen.getByRole('button', { name: 'Hide distributions' }))
     showChart()
     expect(screen.getByRole('button', { name: 'Alpha distribution' }).getAttribute('aria-pressed')).toBe('false')
     expect(screen.getByRole('button', { name: 'Bravo distribution' }).getAttribute('aria-pressed')).toBe('true')
     expect(screen.getByRole('img', { name: /distributions for 1 network$/ })).toBeDefined()
-    const scale = screen.getByRole('checkbox', { name: 'Compare densities on one scale' }) as HTMLInputElement
-    expect(scale.checked).toBe(true)
   })
 
-  it('draws every curve to its own peak unless densities are compared on one scale', () => {
+  it('draws every curve on one density scale', () => {
     // Alpha is ten times as sure as Bravo, so on one density scale Bravo is a tenth of its height.
     const { container } = render(<BeliefsPanel {...props} beliefs={[
       { ...beliefs[0]!, samplingUncertainty: 0.02 }, { ...beliefs[1]!, samplingUncertainty: 0.2 },
@@ -80,11 +77,9 @@ describe('optional Thompson distributions', () => {
     const peakY = (networkId: string) =>
       Number(container.querySelector(`[data-network-id="${networkId}"] circle`)!.getAttribute('cy'))
     const baseline = 246
-    expect(peakY('net-a')).toBe(peakY('net-b'))
-    expect(screen.getByText(/drawn to its own peak/)).toBeDefined()
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Compare densities on one scale' }))
     expect((baseline - peakY('net-a')) / (baseline - peakY('net-b'))).toBeCloseTo(10, 0)
     expect(screen.getByText(/Curve height is probability density/)).toBeDefined()
+    expect(screen.queryByRole('checkbox')).toBeNull()
   })
 
   it('keeps a hovered highlight apart from a focused one, and counts in the singular', () => {
