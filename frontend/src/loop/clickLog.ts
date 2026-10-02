@@ -37,7 +37,10 @@ export interface ClickRecord {
   disclosedAt: number | null
   /** A §5 code: from a synchronous rejection, or from the feed. */
   errorCode: string | null
-  /** Null when no model chose a network: nothing covered the merchant, so the click lapsed. */
+  /**
+   * Null while no model has chosen a network for the click: before the decision, and for good when
+   * nothing covered the merchant or the model failed. Such a click lapses.
+   */
   decision: DecisionRecord | null
 }
 

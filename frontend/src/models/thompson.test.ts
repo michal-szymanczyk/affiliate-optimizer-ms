@@ -13,7 +13,7 @@
 import { describe, expect, it } from 'vitest'
 import { seededRandom } from '../lib/random'
 import type { DecisionContext, SettledObservation } from './model'
-import { thompsonSamplingModel } from './thompson'
+import { PENDING_GRACE_MS, thompsonSamplingModel } from './thompson'
 import type { Network } from '../api/client'
 
 const T0 = 1_700_000_000_000
@@ -27,8 +27,12 @@ const NETWORKS: Network[] = [
   { id: 'net-c', name: 'Charlie', advertisedRate: 0.2, supportedMerchantIds: [9] },
 ]
 
+let issued = 0
+
+/** A click for this merchant. Every call is a new click with its own id, as the service issues them. */
 function click(merchantId: number, now = T0, networks: readonly Network[] = NETWORKS): DecisionContext {
-  return { merchantId, networks, now }
+  issued += 1
+  return { clickId: `clk_${issued}`, merchantId, networks, now }
 }
 
 function result(networkId: string, commission: number, routedAt = T0, delay = MINUTE): SettledObservation {
@@ -186,9 +190,13 @@ function withHistory(
   return { model, last: T0 + (count - 1) * 3_000 }
 }
 
-/** Bravo seen both generous (0.55) and stingy (0.05), ten results in all, stingy last. */
+/**
+ * Bravo seen generous (0.55) for five results and then stingy (0.05) for five. In two runs rather
+ * than alternating, because that is what a swing is: results seconds apart that disagree every time
+ * are a network that scatters, and the belief would rightly read them as that.
+ */
 const swinging = (random: () => number, delay = MINUTE) =>
-  withHistory(random, 10, (index) => (index % 2 === 0 ? 0.55 : 0.05), delay)
+  withHistory(random, 10, (index) => (index < 5 ? 0.55 : 0.05), delay)
 
 /** Bravo seen paying a steady 0.3, half of what it advertises, a hundred times over. */
 const steady = (random: () => number) => withHistory(random, 100, () => 0.3)
@@ -196,7 +204,7 @@ const steady = (random: () => number) => withHistory(random, 100, () => 0.3)
 describe('forgetting with time', () => {
   it('keeps a network that was low a minute ago from winning on a high draw', () => {
     // Alpha draws neutral, Bravo two standard deviations high. A minute after being seen at 0.05,
-    // Bravo's doubt is still small enough that even that reaches only about 0.41 against 0.50.
+    // Bravo's doubt is still small enough that even that reaches only about 0.32 against 0.50.
     const { model, last } = swinging(drawing(0, 2))
 
     expect(model.choose(click(3, last + MINUTE))).toMatchObject({ networkId: 'net-a', exploratory: false })
@@ -255,9 +263,42 @@ describe('clicks already on their way', () => {
     expect(pending.samplingUncertainty).toBeCloseTo(Math.sqrt(1 / (1 / 0.2 ** 2 + 1 / 0.02 ** 2)), 12)
     const decision = model.choose(click(1, T0 + 3_000))!
     expect(decision.rationale).toContain(`± $${pending.samplingUncertainty.toFixed(4)}`)
-    const expired = model.beliefs(T0 + MINUTE + 3_000).find((belief) => belief.networkId === 'net-a')!
+    // Neither click was ever answered. Both are given up on once they are well overdue.
+    const expired = model.beliefs(T0 + 3_000 + MINUTE + PENDING_GRACE_MS).find((belief) => belief.networkId === 'net-a')!
     expect(expired.inFlight).toBe(0)
     expect(expired.samplingUncertainty).toBe(expired.uncertainty)
+  })
+
+  it('still counts a click in the moment between its delay running out and its result landing', () => {
+    // Decided at T0. Routed a little later, disclosed a minute after that, read at the next poll:
+    // for a few seconds past T0 + 1 minute the result is neither in hand nor given up on.
+    const model = thompsonSamplingModel({ random: () => 0 })
+    model.prepare!(NETWORKS)
+    model.choose(click(1))
+    const inFlightAt = (now: number) => model.beliefs(now).find((belief) => belief.networkId === 'net-a')!.inFlight
+
+    expect(inFlightAt(T0 + MINUTE)).toBe(1)
+    expect(inFlightAt(T0 + MINUTE + PENDING_GRACE_MS - 1)).toBe(1)
+    expect(model.choose(click(1, T0 + MINUTE + 3_000))!.rationale).toContain('1 on the way')
+  })
+
+  it('stops counting a click the moment its own result is observed', () => {
+    const model = thompsonSamplingModel({ random: () => 0 })
+    model.prepare!(NETWORKS)
+    model.choose({ ...click(1), clickId: 'clk_answered' })
+    model.choose({ ...click(1, T0 + 3_000), clickId: 'clk_waiting' })
+    const alphaAt = (now: number) => model.beliefs(now).find((belief) => belief.networkId === 'net-a')!
+    expect(alphaAt(T0 + 6_000).inFlight).toBe(2)
+
+    // A result for somebody else's click to the same network answers neither of this model's own.
+    model.observe!({ ...result('net-a', 0.4, T0 + 1_000), clickId: 'clk_from_another_model' })
+    expect(alphaAt(T0 + 6_000).inFlight).toBe(2)
+
+    // Its own result does, at once, with nothing waiting on the clock. Counting it as still on its
+    // way would count the same evidence twice: once folded in, once anticipated.
+    model.observe!({ ...result('net-a', 0.4, T0), clickId: 'clk_answered' })
+    expect(alphaAt(T0 + 6_000).inFlight).toBe(1)
+    expect(model.choose(click(1, T0 + 6_000))!.rationale).toContain('1 on the way')
   })
 
   it('uses the learned disclosure delay in distribution inspection', () => {
@@ -265,18 +306,19 @@ describe('clicks already on their way', () => {
     model.prepare!(NETWORKS)
     model.observe!(result('net-b', 0.3, T0, 8_000))
     model.choose(click(1))
-    expect(model.beliefs(T0 + 7_999).find((belief) => belief.networkId === 'net-a')!.inFlight).toBe(1)
-    expect(model.beliefs(T0 + 8_000).find((belief) => belief.networkId === 'net-a')!.inFlight).toBe(0)
+    const overdue = T0 + 8_000 + PENDING_GRACE_MS
+    expect(model.beliefs(overdue - 1).find((belief) => belief.networkId === 'net-a')!.inFlight).toBe(1)
+    expect(model.beliefs(overdue).find((belief) => belief.networkId === 'net-a')!.inFlight).toBe(0)
   })
 
   it('counts the same pending results when inspecting as when deciding, even out of order', () => {
-    // Two clicks decided out of time order. A minute and five seconds on, only the later one is
-    // still awaited, and the panel and the next decision must agree on that.
+    // Two clicks decided out of time order. Once the earlier one is given up on, only the later one
+    // is still awaited, and the panel and the next decision must agree on that.
     const model = thompsonSamplingModel({ random: () => 0 })
     model.prepare!(NETWORKS)
     model.choose(click(1, T0 + 10_000))
     model.choose(click(1, T0))
-    const later = T0 + MINUTE + 5_000
+    const later = T0 + MINUTE + PENDING_GRACE_MS + 5_000
     expect(model.beliefs(later).find((belief) => belief.networkId === 'net-a')!.inFlight).toBe(1)
     expect(model.choose(click(1, later))!.rationale).toContain('1 on the way')
   })
@@ -314,8 +356,30 @@ describe('clicks already on their way', () => {
 
     expect(model.choose(click(3, later))).toMatchObject({ networkId: 'net-b', exploratory: true })
     expect(model.choose(click(3, later + 3_000))).toMatchObject({ networkId: 'net-a', exploratory: false })
-    // A minute on, the result should have arrived. It has not, so the doubt is back.
-    expect(model.choose(click(3, later + MINUTE + 1_000))).toMatchObject({ networkId: 'net-b', exploratory: true })
+    // Well over a minute on, the result should have arrived. It has not, so the doubt is back.
+    expect(model.choose(click(3, later + MINUTE + PENDING_GRACE_MS))).toMatchObject({
+      networkId: 'net-b',
+      exploratory: true,
+    })
+  })
+
+  it('lets one click on its way settle less of the doubt about a network known to scatter', () => {
+    // Alpha's results, seconds apart, land anywhere from 0.25 to 0.55. One more result will not
+    // say much about what it pays, so a click on its way cannot be counted as settling the question
+    // the way it would for a network whose results agree with each other.
+    const scattered = [0.4, 0.55, 0.3, 0.5, 0.25, 0.45, 0.35, 0.55, 0.3, 0.5, 0.25, 0.4]
+    const model = thompsonSamplingModel({ random: () => 0 })
+    model.prepare!(NETWORKS)
+    scattered.forEach((commission, index) => model.observe!(result('net-a', commission, T0 + index * 3_000)))
+    const later = T0 + 30 * MINUTE
+
+    model.choose(click(1, later))
+    const alpha = model.beliefs(later + 3_000).find((belief) => belief.networkId === 'net-a')!
+
+    expect(alpha.inFlight).toBe(1)
+    expect(alpha.samplingUncertainty).toBeLessThan(alpha.uncertainty)
+    // With the configured noise of 0.02, one pending result would bring this under 0.02.
+    expect(alpha.samplingUncertainty).toBeGreaterThan(0.05)
   })
 
   it('says how many results it is waiting for', () => {
@@ -326,14 +390,14 @@ describe('clicks already on their way', () => {
   })
 
   it('learns how late results are from the results themselves', () => {
-    // A service that discloses after eight seconds rather than a minute. Nine seconds after the
-    // speculative click, its result is overdue and the doubt is back.
+    // A service that discloses after eight seconds rather than a minute. The speculative click is
+    // given up on that long after it, plus the allowance, and not a minute after: the doubt is back.
     const { model, last } = swinging(drawing(0, 2, 0, 2, 0, 2), 8_000)
     const later = last + 30 * MINUTE
 
     expect(model.choose(click(3, later))).toMatchObject({ networkId: 'net-b' })
     expect(model.choose(click(3, later + 3_000))).toMatchObject({ networkId: 'net-a' })
-    expect(model.choose(click(3, later + 9_000))).toMatchObject({ networkId: 'net-b' })
+    expect(model.choose(click(3, later + 8_000 + PENDING_GRACE_MS))).toMatchObject({ networkId: 'net-b' })
   })
 })
 
@@ -341,6 +405,21 @@ describe('bad input', () => {
   it('refuses to decide without a real time', () => {
     const model = thompsonSamplingModel({ random: () => 0 })
     expect(() => model.choose(click(3, Number.NaN))).toThrow(/asked to decide at time NaN/)
+  })
+
+  it('starts a network whose claim is not a number from the typical rate, and still decides', () => {
+    // One malformed rate must not take the whole model down: every click would lapse. The claim
+    // says nothing, so that network starts where a typical one would and is corrected by results.
+    const field: Network[] = [
+      ...NETWORKS,
+      { id: 'net-d', name: 'Delta', advertisedRate: Number.NaN, supportedMerchantIds: [3] },
+    ]
+    const model = thompsonSamplingModel({ random: () => 0 })
+
+    expect(() => model.prepare!(field)).not.toThrow()
+    // The median of the three real claims.
+    expect(model.beliefs(T0).find((belief) => belief.networkId === 'net-d')).toMatchObject({ estimate: 0.4 })
+    expect(model.choose(click(3, T0, field))).toMatchObject({ networkId: 'net-b' })
   })
 
   it('fails loudly on a random source outside [0, 1)', () => {

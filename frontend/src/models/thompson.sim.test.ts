@@ -5,7 +5,7 @@
  * when results arrive a minute late and payouts move: does it earn, does it need its forgetting,
  * does it drop a network that turns stingy and find it again when it turns generous.
  *
- * Read syntheticWorld.ts before reading anything into the numbers. The worlds are invented, one of
+ * Read sim/syntheticWorld.ts before reading anything into the numbers. The worlds are invented, one of
  * them in the shape of the real feed history, so a pass here says the mechanism works. It says
  * nothing about what the real service will pay.
  *
@@ -22,7 +22,7 @@ import { seededRandom } from '../lib/random'
 import { DEFAULT_BELIEF_CONFIG } from './belief'
 import type { OptimizationModel } from './model'
 import { randomOptimizationModel } from './random'
-import { mixedWorld, observedWorld, shiftingWorld, simulate, type SyntheticWorld } from './syntheticWorld'
+import { mixedWorld, observedWorld, shiftingWorld, simulate, type SyntheticWorld } from './sim/syntheticWorld'
 import { thompsonSamplingModel } from './thompson'
 
 const MINUTE = 60_000

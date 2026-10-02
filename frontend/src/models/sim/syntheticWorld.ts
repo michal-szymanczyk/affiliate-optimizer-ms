@@ -17,10 +17,12 @@
  * A model is driven through the same contract the loop uses (prepare, choose, observe), with the
  * same clock rules, so this is also the closest thing to an end-to-end test of that contract that
  * runs without a server.
+ *
+ * Test support only: nothing the running client imports. It lives in `sim/` to say so.
  */
-import type { Network } from '../api/client'
-import { seededRandom, standardNormal } from '../lib/random'
-import { eligibleNetworks, type OptimizationModel, type SettledObservation } from './model'
+import type { Network } from '../../api/client'
+import { seededRandom, standardNormal } from '../../lib/random'
+import { eligibleNetworks, type OptimizationModel, type SettledObservation } from '../model'
 
 const NETWORK_COUNT = 15
 const MERCHANT_COUNT = 100
@@ -267,6 +269,7 @@ export interface SimulationResult {
   /**
    * What the model's choices paid as a share of what the best eligible network would have paid on
    * each click. Both are counted before noise, so luck in the commissions does not move the score.
+   * A click the model let lapse while something covered it counts as earning nothing.
    */
   captured: number
   /** Share of decisions the model flagged as exploratory. */
@@ -290,12 +293,16 @@ export function simulate(
   const awaiting: SettledObservation[] = []
   let disclosed = 0
   const decisions: SimulatedDecision[] = []
+  let issued = 0
   let earned = 0
   let best = 0
 
   model.prepare?.(networks)
 
   for (let at = 0; at < options.durationMs; at += interval) {
+    issued += 1
+    // The id the model is asked about is the id its result comes back under, as in the real loop.
+    const clickId = `sim_${issued}`
     for (let next = awaiting[disclosed]; next !== undefined && next.disclosedAt <= at; next = awaiting[disclosed]) {
       model.observe?.(next)
       disclosed += 1
@@ -307,14 +314,17 @@ export function simulate(
     if (merchantId === undefined) continue
 
     const eligible = eligibleNetworks(merchantId, networks)
-    const decision = model.choose({ merchantId, networks, now: at })
-    if (eligible.length === 0 || decision === null) continue
+    const decision = model.choose({ clickId, merchantId, networks, now: at })
+    if (eligible.length === 0) continue
 
     const payoutOf = (networkId: string): number => {
       const entry = byId.get(networkId)
       return entry === undefined ? 0 : payoutAt(entry, at)
     }
+    // Counted before looking at the decision: a model that lets a coverable click lapse has still
+    // passed up what the best network would have paid.
     best += Math.max(...eligible.map((network) => payoutOf(network.id)))
+    if (decision === null) continue
     decisions.push({ at, networkId: decision.networkId, exploratory: decision.exploratory === true })
 
     const chosen = byId.get(decision.networkId)
@@ -324,7 +334,7 @@ export function simulate(
     const payout = payoutAt(chosen, at)
     earned += payout
     awaiting.push({
-      clickId: `sim_${awaiting.length + 1}`,
+      clickId,
       networkId: decision.networkId,
       commission: Math.max(0.0001, payout * (1 + chosen.noiseFraction * scatter)),
       routedAt: at,

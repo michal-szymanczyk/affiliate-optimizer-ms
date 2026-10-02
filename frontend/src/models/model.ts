@@ -12,6 +12,11 @@
 import type { Network } from '../api/client'
 
 export interface DecisionContext {
+  /**
+   * The click being decided. The same id comes back in the `SettledObservation` of its result, so
+   * a model can tell which of its own decisions a result answers.
+   */
+  clickId: string
   merchantId: number
   networks: readonly Network[]
   /**

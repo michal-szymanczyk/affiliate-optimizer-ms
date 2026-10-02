@@ -16,9 +16,9 @@ const NETWORKS: Network[] = [
   { id: 'net-c', name: 'C', advertisedRate: 0.2, supportedMerchantIds: [9] },
 ]
 
-/** A click for this merchant. The random model has no use for the time, so it is fixed. */
+/** A click for this merchant. The random model has no use for the id or the time, so they are fixed. */
 function click(merchantId: number, networks: readonly Network[] = NETWORKS): DecisionContext {
-  return { merchantId, networks, now: 0 }
+  return { clickId: 'clk_1', merchantId, networks, now: 0 }
 }
 
 describe('eligibleNetworks', () => {

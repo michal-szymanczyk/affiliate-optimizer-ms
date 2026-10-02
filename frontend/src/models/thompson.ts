@@ -42,6 +42,16 @@ import { eligibleNetworks, type OptimizationModel } from './model'
 /** Until a result says otherwise. API.md: commissions are disclosed one minute after routing. */
 const DEFAULT_DISCLOSURE_DELAY_MS = 60_000
 
+/**
+ * How long past the disclosure delay a result is still taken to be on its way.
+ *
+ * A click is decided when it is issued, but its delay runs from when it is routed, which can be a
+ * few seconds later if the routing call had to be retried, and the result is then only read at the
+ * next poll. Without this allowance a click stops counting as on its way a moment before its result
+ * lands, and for that moment the network's doubt is back as if nothing had been tried.
+ */
+export const PENDING_GRACE_MS = 10_000
+
 /** One network's belief at a given moment, as an operator would read it. */
 export interface NetworkBeliefView {
   networkId: string
@@ -94,6 +104,11 @@ function evidence(candidate: Candidate): string {
   return inFlight === 0 ? `${estimate} (${seen})` : `${estimate} (${seen}, ${inFlight} on the way)`
 }
 
+/** A claim that is not a number says nothing, so that network starts from the typical rate instead. */
+function claimOf(network: Network, params: BeliefParams): number {
+  return Number.isFinite(network.advertisedRate) ? network.advertisedRate : params.scale
+}
+
 /** Pending results reduce doubt, but cannot say which way the estimate will move. */
 function samplingUncertainty(variance: number, inFlight: number, noiseVariance: number): number {
   return Math.sqrt(inFlight === 0 ? variance : 1 / (1 / variance + inFlight / noiseVariance))
@@ -105,8 +120,11 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
 
   let params: BeliefParams | null = null
   const beliefs = new Map<string, Belief>()
-  /** Decision times of this model's own clicks to each network, while their results are awaited. */
-  const awaited = new Map<string, number[]>()
+  /**
+   * This model's own clicks to each network whose results are awaited: click id to decision time.
+   * A click leaves when its result is observed, or by age if no result ever comes.
+   */
+  const awaited = new Map<string, Map<string, number>>()
   let disclosureDelayMs = DEFAULT_DISCLOSURE_DELAY_MS
 
   /** Starts every network at its own advertised claim, held loosely. */
@@ -115,7 +133,7 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
     beliefs.clear()
     awaited.clear()
     for (const network of networks) {
-      beliefs.set(network.id, priorBelief(network.advertisedRate, fresh))
+      beliefs.set(network.id, priorBelief(claimOf(network, fresh), fresh))
     }
     params = fresh
     return fresh
@@ -125,28 +143,43 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
   function beliefFor(network: Network, current: BeliefParams): Belief {
     const known = beliefs.get(network.id)
     if (known !== undefined) return known
-    const prior = priorBelief(network.advertisedRate, current)
+    const prior = priorBelief(claimOf(network, current), current)
     beliefs.set(network.id, prior)
     return prior
   }
 
   /**
-   * This model's clicks to a network that are still waiting for their result at `now`.
+   * Whether a click decided at `decidedAt` and not yet answered is still worth waiting for at `now`.
    *
-   * The one rule for what counts as waiting, shared by deciding and inspecting. It reads the queue
-   * and leaves it alone, so inspecting any time, even a future one, cannot change a decision.
+   * The age limit is for the click that was never routed, or whose result never comes: it must not
+   * hold the network's doubt down forever.
    */
-  function pendingAt(networkId: string, now: number): number[] {
-    return awaited.get(networkId)?.filter((decidedAt) => now - decidedAt < disclosureDelayMs) ?? []
+  function stillAwaited(decidedAt: number, now: number): boolean {
+    return now - decidedAt < disclosureDelayMs + PENDING_GRACE_MS
   }
 
-  /** How many are waiting at a decision, which also forgets the ones that no longer are. */
+  /**
+   * How many of this model's clicks to a network are still waiting for their result at `now`.
+   *
+   * The one rule for what counts as waiting, shared by deciding and inspecting. It reads the record
+   * and leaves it alone, so inspecting any time, even a future one, cannot change a decision.
+   */
+  function pendingAt(networkId: string, now: number): number {
+    let pending = 0
+    for (const decidedAt of awaited.get(networkId)?.values() ?? []) {
+      if (stillAwaited(decidedAt, now)) pending += 1
+    }
+    return pending
+  }
+
+  /** How many are waiting at a decision, which also forgets the ones given up on. */
   function onTheWay(networkId: string, now: number): number {
-    // Dropped by age rather than by matching results: a click that was never routed, or whose
-    // result never comes, must not hold the network's doubt down forever.
-    const pending = pendingAt(networkId, now)
-    if (awaited.has(networkId)) awaited.set(networkId, pending)
-    return pending.length
+    const clicks = awaited.get(networkId)
+    if (clicks === undefined) return 0
+    for (const [clickId, decidedAt] of clicks) {
+      if (!stillAwaited(decidedAt, now)) clicks.delete(clickId)
+    }
+    return clicks.size
   }
 
   return {
@@ -156,7 +189,7 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
       startOver(networks)
     },
 
-    choose({ merchantId, networks, now }) {
+    choose({ clickId, merchantId, networks, now }) {
       const eligible = eligibleNetworks(merchantId, networks)
       if (eligible.length === 0) return null
       if (!Number.isFinite(now)) {
@@ -174,7 +207,7 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
         const belief = beliefFor(network, current)
         const view = beliefAt(belief, now, current)
         const inFlight = onTheWay(network.id, now)
-        const uncertainty = samplingUncertainty(view.variance, inFlight, current.noiseVariance)
+        const uncertainty = samplingUncertainty(view.variance, inFlight, belief.noiseVariance)
         return {
           network,
           observations: belief.observations,
@@ -189,9 +222,9 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
         candidate.estimate > best.estimate ? candidate : best,
       )
 
-      const times = awaited.get(chosen.network.id)
-      if (times === undefined) awaited.set(chosen.network.id, [now])
-      else times.push(now)
+      const clicks = awaited.get(chosen.network.id)
+      if (clicks === undefined) awaited.set(chosen.network.id, new Map([[clickId, now]]))
+      else clicks.set(clickId, now)
 
       if (chosen === favorite) {
         return {
@@ -217,6 +250,10 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
       // The service says how late results are by being that late. One minute on the real one.
       if (Number.isFinite(delay) && delay > 0) disclosureDelayMs = delay
 
+      // The result is here, so the click is no longer on its way. Only this model's own clicks are
+      // in the record: a result for anyone else's click finds nothing to remove.
+      awaited.get(observation.networkId)?.delete(observation.clickId)
+
       const belief = beliefs.get(observation.networkId)
       // Before the field is known there is no scale to weigh a result against, and a network that
       // is not in the field can never be chosen. Either way there is nothing to update.
@@ -232,12 +269,12 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
       if (current === null) return []
       return Array.from(beliefs, ([networkId, belief]) => {
         const view = beliefAt(belief, now, current)
-        const inFlight = pendingAt(networkId, now).length
+        const inFlight = pendingAt(networkId, now)
         return {
           networkId,
           estimate: view.mean,
           uncertainty: Math.sqrt(view.variance),
-          samplingUncertainty: samplingUncertainty(view.variance, inFlight, current.noiseVariance),
+          samplingUncertainty: samplingUncertainty(view.variance, inFlight, belief.noiseVariance),
           inFlight,
           usual: belief.usualMean,
           usualSpread: Math.sqrt(belief.usualVariance),

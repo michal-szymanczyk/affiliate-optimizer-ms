@@ -81,6 +81,7 @@ export function App() {
   const counters = runCounters(clicks, now)
   const running = loop?.state.running ?? false
   const feedError = loop?.state.feedError ?? null
+  const modelError = loop?.state.modelError ?? null
   const activeModelName = loop?.state.activeModelName ?? ''
 
   return (
@@ -179,6 +180,10 @@ export function App() {
 
             {feedError !== null ? (
               <FeedErrorStrip error={feedError} onDismiss={() => loop?.dismissFeedError()} />
+            ) : null}
+
+            {modelError !== null ? (
+              <FeedErrorStrip error={modelError} onDismiss={() => loop?.dismissModelError()} />
             ) : null}
 
             {models !== null ? (

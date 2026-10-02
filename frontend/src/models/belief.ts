@@ -42,7 +42,11 @@
  *                       than half a typical rate. The real feed shows the largest claims missing
  *                       by the most, so trusting them as much as the small ones sent the first
  *                       minute of a fresh run almost entirely to the highest claim.
- *   noise        0.05   One commission scatters about this much around the current payout.
+ *   noise        0.05   One commission scatters at least this much around the current payout. Some
+ *                       networks scatter far more (the real feed shows about 40% for a third of
+ *                       them), so where a network's own results say so the belief uses what they
+ *                       say instead: see `scatterFrom`. Otherwise every surprising result from such
+ *                       a network would be taken for a change in what it pays.
  *   relaxation   10 min How long a network's current behavior is assumed to last. "Several times
  *                       in half an hour" (CONCEPTS.md).
  *   claim weight 2      The advertised rate counts as two results in the usual view.
@@ -59,7 +63,10 @@ const MS_PER_MINUTE = 60_000
 export interface BeliefConfig {
   /** Standard deviation of the starting belief, as a fraction of the typical advertised rate. */
   priorSdFraction: number
-  /** Standard deviation of one commission around the current payout, as the same fraction. */
+  /**
+   * The least one commission is taken to scatter around the current payout, as a standard deviation
+   * in the same fraction. A network whose own results scatter more is believed over this.
+   */
   noiseSdFraction: number
   /** How long a network's current behavior is assumed to last. Zero or less means never forget. */
   relaxationMinutes: number
@@ -82,6 +89,7 @@ export interface BeliefParams {
   /** The typical advertised rate that the money amounts are multiples of. */
   scale: number
   priorSdFraction: number
+  /** The configured noise: where every network's scatter starts, and the floor under what is learned. */
   noiseVariance: number
   /** Null when the belief never forgets. */
   relaxationMs: number | null
@@ -107,7 +115,30 @@ export interface Belief {
   usualMean: number
   /** How much what it pays usually varies. */
   usualVariance: number
+  /** What the newest result paid. Null before the first one. */
+  lastCommission: number | null
+  /**
+   * How far apart, in money, results routed moments apart have been: the newest few such gaps.
+   * This is what the network's own scatter is read from. See `scatterFrom`.
+   */
+  recentSteps: readonly number[]
+  /**
+   * How much one commission scatters around what the network currently pays, as learned so far.
+   * Starts at the configured noise and never goes below it.
+   */
+  noiseVariance: number
 }
+
+/** Two results routed no further apart than this are taken to describe the same payout. */
+const SCATTER_PAIR_WINDOW_MS = 15_000
+/** How many of those gaps are kept, and the fewest worth reading anything from. */
+const SCATTER_STEPS_KEPT = 30
+const SCATTER_STEPS_NEEDED = 5
+/**
+ * The median gap between two results with the same payout, in standard deviations of one result:
+ * 0.6745 for the median of a normal magnitude, times sqrt(2) because a gap has two results in it.
+ */
+const MEDIAN_STEP_PER_SD = 0.6745 * Math.SQRT2
 
 function median(sorted: readonly number[]): number | undefined {
   const upper = sorted[Math.floor(sorted.length / 2)]
@@ -181,7 +212,28 @@ export function priorBelief(advertisedRate: number, params: BeliefParams): Belie
     sumOfSquares: 0,
     usualMean: advertisedRate,
     usualVariance: variance,
+    lastCommission: null,
+    recentSteps: [],
+    noiseVariance: params.noiseVariance,
   }
+}
+
+/**
+ * How much one commission scatters around the current payout, read from the network's own results.
+ *
+ * Two results routed seconds apart were paid at the same payout, so the gap between them is scatter
+ * and nothing else. The MEDIAN gap is used because now and then a pair straddles the moment the
+ * payout changed: that gap is enormous, and a mean would let one of them pass a steady network off
+ * as a noisy one. A median does not notice until such pairs are most of what it has seen.
+ *
+ * Never below the configured noise, which is all there is to go on before there are enough pairs,
+ * and never above how much the network varies in total, which the scatter is only a part of.
+ */
+function scatterFrom(steps: readonly number[], usualVariance: number, params: BeliefParams): number {
+  if (steps.length < SCATTER_STEPS_NEEDED) return params.noiseVariance
+  const typical = median([...steps].sort((a, b) => a - b)) ?? 0
+  const learned = (typical / MEDIAN_STEP_PER_SD) ** 2
+  return Math.max(params.noiseVariance, Math.min(learned, usualVariance))
 }
 
 /**
@@ -230,8 +282,10 @@ export function observe(
   }
 
   let before = beliefAt(belief, routedAt, params)
-  let noise = params.noiseVariance
+  let noise = belief.noiseVariance
   let asOf = routedAt
+  let lastCommission: number | null = commission
+  let recentSteps = belief.recentSteps
   if (belief.asOf !== null && routedAt < belief.asOf) {
     // A result OLDER than what the belief already reflects. The feed discloses in routing order, so
     // this should not happen, but if it does the result still says something about the present:
@@ -240,6 +294,14 @@ export function observe(
     before = { mean: belief.mean, variance: belief.variance }
     noise += belief.usualVariance * (1 - kept(belief.asOf - routedAt, params) ** 2)
     asOf = belief.asOf
+    lastCommission = belief.lastCommission
+  } else if (
+    belief.asOf !== null &&
+    belief.lastCommission !== null &&
+    routedAt - belief.asOf <= SCATTER_PAIR_WINDOW_MS
+  ) {
+    // Routed moments after the newest result: the gap between the two is the network's scatter.
+    recentSteps = [...recentSteps.slice(1 - SCATTER_STEPS_KEPT), Math.abs(commission - belief.lastCommission)]
   }
 
   const gain = before.variance / (before.variance + noise)
@@ -265,5 +327,8 @@ export function observe(
     sumOfSquares,
     usualMean,
     usualVariance,
+    lastCommission,
+    recentSteps,
+    noiseVariance: scatterFrom(recentSteps, usualVariance, params),
   }
 }

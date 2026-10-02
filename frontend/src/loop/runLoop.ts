@@ -33,6 +33,12 @@ export interface LoopState {
   merchants: Merchant[]
   networks: Network[]
   feedError: FeedError | null
+  /**
+   * The last failure of an optimization model. Its own slot, apart from `feedError`: nothing the
+   * server does fixes a model, so a server error must not replace it and a successful call must not
+   * clear it. It stays until the operator dismisses it.
+   */
+  modelError: FeedError | null
   /** The optimization model deciding clicks right now. The others keep learning from the feed. */
   activeModelName: string
   /**
@@ -78,6 +84,10 @@ export class RunLoop {
    * Click ids of feed rows already acted on. The feed hands a row over more than once when the
    * cursor is restarted, and a model that learned from the same commission twice would be twice as
    * sure of it as the evidence allows.
+   *
+   * It only ever grows: one id for every row in the credential pair's history, including rows from
+   * before this page load. A high-water mark would be smaller, but API.md promises no ordering to
+   * hang one on, and at twenty clicks a minute a day of ids is a few megabytes at most.
    */
   private readonly seenRows = new Set<string>()
   private clickTimer: ReturnType<typeof setTimeout> | null = null
@@ -97,10 +107,11 @@ export class RunLoop {
       )
     }
     const names = options.models.map((model) => model.name)
-    const distinctNames = new Set(names)
-    if (distinctNames.size < names.length) {
+    const repeated = names.find((name, index) => names.indexOf(name) !== index)
+    if (repeated !== undefined) {
       throw new Error(
-        `RunLoop: two optimization models have the same name. Names must be unique.`,
+        `RunLoop: two optimization models are both named "${repeated}". Names must be unique: a ` +
+          `click records the name of the model that decided it.`,
       )
     }
 
@@ -116,6 +127,7 @@ export class RunLoop {
       merchants: [],
       networks: [],
       feedError: null,
+      modelError: null,
       activeModelName: first.name,
       skippedDisclosures: 0,
       revision: 0,
@@ -155,11 +167,16 @@ export class RunLoop {
       try {
         model.prepare?.(networkList)
       } catch (cause) {
-        this.reportModelFailure(model, 'preparing for the run', cause)
+        // A deciding model that could not prepare would fail on every click, and each of those
+        // clicks is already issued by the time it does. So the run starts paused instead.
+        const deciding = model === this.active
+        if (deciding) this.state.running = false
+        this.reportModelFailure(model, 'preparing for the run', cause, deciding)
       }
     }
     this.changed()
 
+    // Does nothing when the run starts paused. Polling starts either way.
     this.scheduleClick(0)
     this.schedulePoll(POLL_INTERVAL_MS)
   }
@@ -216,6 +233,11 @@ export class RunLoop {
     this.changed()
   }
 
+  dismissModelError(): void {
+    this.state.modelError = null
+    this.changed()
+  }
+
   private scheduleClick(delayMs: number): void {
     if (this.stopped || !this.state.running) return
     this.clickTimer = setTimeout(() => void this.issueAndRoute(), delayMs)
@@ -238,10 +260,7 @@ export class RunLoop {
   }
 
   private clearRecoverableFeedError(): void {
-    const error = this.state.feedError
-    // A model failure is not something a successful server call recovers from, so it stays on
-    // screen until the operator dismisses it.
-    if (error !== null && error.dismissible && error.code !== MODEL_ERROR) {
+    if (this.state.feedError !== null && this.state.feedError.dismissible) {
       this.state.feedError = null
       this.changed()
     }
@@ -249,14 +268,23 @@ export class RunLoop {
 
   /**
    * Handler for optimization model errors.
+   *
+   * `paused` says the caller stopped the click loop because of this failure, so the message can
+   * tell the operator what to do about it.
    */
-  private reportModelFailure(model: OptimizationModel, doing: string, cause: unknown): void {
+  private reportModelFailure(
+    model: OptimizationModel,
+    doing: string,
+    cause: unknown,
+    paused = false,
+  ): void {
     console.error(`Optimization model "${model.name}" failed while ${doing}`, cause)
-    this.state.feedError = {
+    const reason = cause instanceof Error ? cause.message : String(cause)
+    this.state.modelError = {
       code: MODEL_ERROR,
-      message: `The optimization model "${model.name}" failed while ${doing}: ${
-        cause instanceof Error ? cause.message : String(cause)
-      }`,
+      message:
+        `The optimization model "${model.name}" failed while ${doing}: ${reason}` +
+        (paused ? ' The click loop is paused: switch model or resume.' : ''),
       until: this.now(),
       dismissible: true,
     }
@@ -336,6 +364,7 @@ export class RunLoop {
     let decision: RoutingDecision | null
     try {
       decision = model.choose({
+        clickId: click.clickId,
         merchantId: click.merchantId,
         networks: this.state.networks,
         // The click's own issue time, on the server's clock.
@@ -343,8 +372,12 @@ export class RunLoop {
       })
     } catch (cause) {
       // Leave the click un-routed rather than guess on the model's behalf. It lapses, visibly.
-      this.reportModelFailure(model, 'choosing a network', cause)
-      this.scheduleClick(CLICK_INTERVAL_MS)
+      // And stop issuing: a model that failed on this click will most likely fail on the next, and
+      // every one of those would be a click drawn from the ration only to lapse. Polling goes on,
+      // so clicks already routed still settle. The operator switches model or resumes.
+      this.state.running = false
+      this.clickTimer = null
+      this.reportModelFailure(model, 'choosing a network', cause, true)
       return
     }
     if (decision === null) {

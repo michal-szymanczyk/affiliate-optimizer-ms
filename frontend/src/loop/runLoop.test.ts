@@ -593,7 +593,7 @@ describe('optimization models', () => {
     expect(bundle.raw.nextClick).not.toHaveBeenCalled()
   })
 
-  it('asks only the active model, and tells it the merchant, the field and the issue time', async () => {
+  it('asks only the active model, and tells it the click, the merchant, the field and the issue time', async () => {
     const bundle = stubClient()
     const active = probeModel('active')
     const idle = probeModel('idle')
@@ -603,8 +603,9 @@ describe('optimization models', () => {
     await vi.advanceTimersByTimeAsync(0)
 
     // The click's own issue time on the server's clock, not the browser's: results are stamped by
-    // the server too, and a model that ages its knowledge needs both on one clock.
-    expect(active.contexts).toEqual([{ merchantId: 42, networks: NETWORKS, now: T0 }])
+    // the server too, and a model that ages its knowledge needs both on one clock. The click id is
+    // the one its result will come back under.
+    expect(active.contexts).toEqual([{ clickId: 'clk_1', merchantId: 42, networks: NETWORKS, now: T0 }])
     expect(idle.contexts).toHaveLength(0)
     loop.stop()
   })
@@ -740,24 +741,65 @@ describe('optimization models', () => {
     await loop.start()
     await vi.advanceTimersByTimeAsync(2_000)
 
-    expect(loop.state.feedError?.code).toBe('MODEL_ERROR')
-    expect(loop.state.feedError?.message).toMatch(/"broken".*the estimate became NaN/)
+    // In its own slot, not the feed's: this is not something the server did.
+    expect(loop.state.modelError?.code).toBe('MODEL_ERROR')
+    expect(loop.state.modelError?.message).toMatch(/"broken".*the estimate became NaN/)
+    expect(loop.state.feedError).toBeNull()
     expect(healthy.observations).toHaveLength(1)
+    // Learning is not deciding: a model that cannot learn does not stop the click loop.
+    expect(loop.state.running).toBe(true)
 
     // The cursor still advanced. Had the exception escaped the poll, the same row would be read
     // into the same exception on every turn.
     await vi.advanceTimersByTimeAsync(2_000)
     expect(commissions.mock.calls.map(([cursor]) => cursor)).toEqual([null, 'cursor-2'])
     // And a successful poll does not quietly clear it: nothing the server did fixed the model.
-    expect(loop.state.feedError?.code).toBe('MODEL_ERROR')
+    expect(loop.state.modelError?.code).toBe('MODEL_ERROR')
 
-    loop.dismissFeedError()
-    expect(loop.state.feedError).toBeNull()
+    loop.dismissModelError()
+    expect(loop.state.modelError).toBeNull()
     loop.stop()
     quiet.mockRestore()
   })
 
-  it('surfaces a model that throws while choosing, leaves the click un-routed, and keeps issuing', async () => {
+  it('keeps a model failure on screen through a server error and the recovery from it', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let polls = 0
+    const bundle = stubClient({
+      commissions: vi.fn(async () => {
+        polls += 1
+        if (polls === 1) return { commissions: [settlement('clk_1', 0.5)], nextCursor: 'cursor-2' }
+        if (polls === 2) throw new ApiError(429, 'RATE_LIMITED', 'slow down', 1)
+        return { commissions: [], nextCursor: 'cursor-2' }
+      }),
+    })
+    const broken: OptimizationModel = {
+      name: 'broken',
+      choose: () => ({ networkId: 'net-covers', rationale: 'always the same' }),
+      observe: () => {
+        throw new Error('the estimate became NaN')
+      },
+    }
+    const { loop } = makeLoop(bundle, new ClickLog(), [broken])
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(loop.state.modelError?.code).toBe('MODEL_ERROR')
+
+    // The throttle is reported beside the model failure, not in place of it.
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(loop.state.feedError?.code).toBe('RATE_LIMITED')
+    expect(loop.state.modelError?.code).toBe('MODEL_ERROR')
+
+    // The next successful call clears the throttle. The model is as broken as it was.
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(loop.state.feedError).toBeNull()
+    expect(loop.state.modelError?.code).toBe('MODEL_ERROR')
+    loop.stop()
+    quiet.mockRestore()
+  })
+
+  it('pauses when the deciding model throws while choosing, instead of spending a click every turn', async () => {
     const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
     const bundle = stubClient()
     const broken: OptimizationModel = {
@@ -766,19 +808,80 @@ describe('optimization models', () => {
         throw new Error('no belief for this network')
       },
     }
-    const { loop, log } = makeLoop(bundle, new ClickLog(), [broken])
+    const healthy = probeModel('healthy')
+    const { loop, log } = makeLoop(bundle, new ClickLog(), [broken, healthy.model])
 
     await loop.start()
     await vi.advanceTimersByTimeAsync(0)
 
-    expect(loop.state.feedError?.code).toBe('MODEL_ERROR')
+    expect(loop.state.modelError?.code).toBe('MODEL_ERROR')
+    expect(loop.state.modelError?.message).toMatch(/click loop is paused/)
     // Not routed on the model's behalf: the loop does not guess where a click should go.
     expect(bundle.raw.route).not.toHaveBeenCalled()
     expect(log.get('clk_1')).toMatchObject({ routedAt: null, decision: null })
 
-    // The click loop keeps its cadence instead of dying with the header still saying "running".
-    await vi.advanceTimersByTimeAsync(3_000)
+    // One click was lost finding out. No more are drawn from the ration to lapse the same way, and
+    // the header says paused rather than pretending to run.
+    expect(loop.state.running).toBe(false)
+    const polledBefore = (bundle.raw.commissions as ReturnType<typeof vi.fn>).mock.calls.length
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(bundle.raw.nextClick).toHaveBeenCalledTimes(1)
+    // Polling goes on, so clicks routed before the failure still settle.
+    expect((bundle.raw.commissions as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(polledBefore)
+
+    // The way out is the operator's: another model, then resume.
+    loop.selectModel('healthy')
+    loop.resume()
+    await vi.advanceTimersByTimeAsync(0)
     expect(bundle.raw.nextClick).toHaveBeenCalledTimes(2)
+    expect(log.get('clk_2')?.decision?.modelName).toBe('healthy')
+    expect(loop.state.running).toBe(true)
+    loop.stop()
+    quiet.mockRestore()
+  })
+
+  it('starts paused when the deciding model cannot prepare, and still polls', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const bundle = stubClient()
+    const broken: OptimizationModel = {
+      name: 'broken',
+      prepare: () => {
+        throw new Error('no network advertises a positive rate')
+      },
+      choose: () => ({ networkId: 'net-covers', rationale: 'never reached' }),
+    }
+    const { loop } = makeLoop(bundle, new ClickLog(), [broken, probeModel('healthy').model])
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(loop.state.running).toBe(false)
+    expect(loop.state.modelError?.message).toMatch(/"broken" failed while preparing.*click loop is paused/)
+    expect(bundle.raw.nextClick).not.toHaveBeenCalled()
+    expect(bundle.raw.commissions).toHaveBeenCalled()
+    loop.stop()
+    quiet.mockRestore()
+  })
+
+  it('starts running when only a model that is not deciding cannot prepare', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const bundle = stubClient()
+    const broken: OptimizationModel = {
+      name: 'broken',
+      prepare: () => {
+        throw new Error('no network advertises a positive rate')
+      },
+      choose: () => ({ networkId: 'net-covers', rationale: 'never reached' }),
+    }
+    const { loop } = makeLoop(bundle, new ClickLog(), [probeModel('healthy').model, broken])
+
+    await loop.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(loop.state.running).toBe(true)
+    expect(loop.state.modelError?.message).toMatch(/"broken" failed while preparing/)
+    expect(loop.state.modelError?.message).not.toMatch(/paused/)
+    expect(bundle.raw.nextClick).toHaveBeenCalledTimes(1)
     loop.stop()
     quiet.mockRestore()
   })

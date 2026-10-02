@@ -190,6 +190,79 @@ describe('what a network usually pays', () => {
   })
 })
 
+describe('how much a network scatters', () => {
+  // Results three seconds apart that land anywhere from 0.25 to 0.55: gaps of 0.1 to 0.3.
+  const SCATTERED = [0.4, 0.55, 0.3, 0.5, 0.25, 0.45, 0.35, 0.55, 0.3, 0.5, 0.25, 0.4]
+
+  it('starts at the configured noise, and stays there for a network whose results agree', () => {
+    expect(priorBelief(0.4, PARAMS).noiseVariance).toBe(PARAMS.noiseVariance)
+    expect(after(0.4, Array<number>(50).fill(0.4)).noiseVariance).toBe(PARAMS.noiseVariance)
+    // Too few pairs to read anything from yet, however far apart they are.
+    expect(after(0.4, [0.4, 0.55, 0.3]).noiseVariance).toBe(PARAMS.noiseVariance)
+  })
+
+  it('reads it from results routed moments apart', () => {
+    const noisy = after(0.4, SCATTERED)
+
+    // The median gap is 0.2, which for two results of the same payout means each scatters by
+    // 0.2 / (0.6745 x sqrt 2), about 0.21. Capped at how much the network varies in total.
+    expect(noisy.recentSteps).toHaveLength(SCATTERED.length - 1)
+    expect(Math.sqrt(noisy.noiseVariance)).toBeGreaterThan(0.1)
+    expect(noisy.noiseVariance).toBeLessThanOrEqual(noisy.usualVariance)
+  })
+
+  it('stops a result from a noisy network moving the estimate most of the way to itself', () => {
+    // The same stale belief and the same surprising result. Where results are known to scatter,
+    // one of them is weak evidence, and the estimate goes less than half of the way. Where they
+    // are known to agree, one result all but settles it.
+    const later = T0 + 30 * MINUTE
+    const noisy = after(0.4, SCATTERED)
+    const quiet = after(0.4, Array<number>(SCATTERED.length).fill(0.4))
+    const moved = (belief: Belief) => {
+      const before = beliefAt(belief, later, PARAMS).mean
+      return (observe(belief, 0.6, later, PARAMS).mean - before) / (0.6 - before)
+    }
+
+    expect(moved(noisy)).toBeLessThan(0.6)
+    expect(moved(noisy)).toBeGreaterThan(0)
+    expect(moved(quiet)).toBeGreaterThan(0.6)
+  })
+
+  it('is not fooled by a payout that changed between two results', () => {
+    // Ten results at 0.55, then ten at 0.05. One gap of 0.5 among nineteen of nothing: a network
+    // that swings, not one that scatters. A mean of the gaps would call it noisy.
+    const swung = after(0.4, [...Array<number>(10).fill(0.55), ...Array<number>(10).fill(0.05)])
+
+    expect(swung.noiseVariance).toBe(PARAMS.noiseVariance)
+  })
+
+  it('reads nothing from results routed too far apart to describe the same payout', () => {
+    // A minute between results: the payout may have moved in between, so the gap is not scatter.
+    const sparse = SCATTERED.reduce(
+      (belief, commission, index) => observe(belief, commission, T0 + index * MINUTE, PARAMS),
+      priorBelief(0.4, PARAMS),
+    )
+
+    expect(sparse.recentSteps).toHaveLength(0)
+    expect(sparse.noiseVariance).toBe(PARAMS.noiseVariance)
+  })
+
+  it('keeps only the newest gaps, so a network that settles down is believed again', () => {
+    const settled = after(0.4, [...SCATTERED, ...Array<number>(40).fill(0.4)])
+
+    expect(settled.recentSteps).toHaveLength(30)
+    expect(settled.noiseVariance).toBe(PARAMS.noiseVariance)
+  })
+
+  it('reads nothing from an out-of-order result', () => {
+    const belief = after(0.4, [0.4, 0.4])
+    const late = observe(belief, 0.9, T0, PARAMS)
+
+    expect(late.recentSteps).toEqual(belief.recentSteps)
+    expect(late.lastCommission).toBe(0.4)
+  })
+})
+
 describe('beliefAt', () => {
   const observed = observe(priorBelief(0.6, PARAMS), 0.3, T0, PARAMS)
 
