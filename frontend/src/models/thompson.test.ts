@@ -243,6 +243,68 @@ describe('forgetting with time', () => {
 })
 
 describe('clicks already on their way', () => {
+  it('exposes the draw uncertainty while preserving the unadjusted belief uncertainty', () => {
+    const model = thompsonSamplingModel({ random: () => 0 })
+    model.prepare!(NETWORKS)
+    const initial = model.beliefs(T0).find((belief) => belief.networkId === 'net-a')!
+    expect(initial).toMatchObject({ uncertainty: 0.2, samplingUncertainty: 0.2, inFlight: 0 })
+    model.choose(click(1))
+    const pending = model.beliefs(T0 + 3_000).find((belief) => belief.networkId === 'net-a')!
+    expect(pending.uncertainty).toBe(initial.uncertainty)
+    expect(pending.inFlight).toBe(1)
+    expect(pending.samplingUncertainty).toBeCloseTo(Math.sqrt(1 / (1 / 0.2 ** 2 + 1 / 0.02 ** 2)), 12)
+    const decision = model.choose(click(1, T0 + 3_000))!
+    expect(decision.rationale).toContain(`± $${pending.samplingUncertainty.toFixed(4)}`)
+    const expired = model.beliefs(T0 + MINUTE + 3_000).find((belief) => belief.networkId === 'net-a')!
+    expect(expired.inFlight).toBe(0)
+    expect(expired.samplingUncertainty).toBe(expired.uncertainty)
+  })
+
+  it('uses the learned disclosure delay in distribution inspection', () => {
+    const model = thompsonSamplingModel({ random: () => 0 })
+    model.prepare!(NETWORKS)
+    model.observe!(result('net-b', 0.3, T0, 8_000))
+    model.choose(click(1))
+    expect(model.beliefs(T0 + 7_999).find((belief) => belief.networkId === 'net-a')!.inFlight).toBe(1)
+    expect(model.beliefs(T0 + 8_000).find((belief) => belief.networkId === 'net-a')!.inFlight).toBe(0)
+  })
+
+  it('counts the same pending results when inspecting as when deciding, even out of order', () => {
+    // Two clicks decided out of time order. A minute and five seconds on, only the later one is
+    // still awaited, and the panel and the next decision must agree on that.
+    const model = thompsonSamplingModel({ random: () => 0 })
+    model.prepare!(NETWORKS)
+    model.choose(click(1, T0 + 10_000))
+    model.choose(click(1, T0))
+    const later = T0 + MINUTE + 5_000
+    expect(model.beliefs(later).find((belief) => belief.networkId === 'net-a')!.inFlight).toBe(1)
+    expect(model.choose(click(1, later))!.rationale).toContain('1 on the way')
+  })
+
+  it('does not change seeded decisions or pending queues when inspecting present or future times', () => {
+    let inspectedDraws = 0
+    let controlDraws = 0
+    const inspectedRandom = seededRandom(37)
+    const controlRandom = seededRandom(37)
+    const inspected = thompsonSamplingModel({ random: () => { inspectedDraws += 1; return inspectedRandom() } })
+    const control = thompsonSamplingModel({ random: () => { controlDraws += 1; return controlRandom() } })
+    inspected.prepare!(NETWORKS)
+    control.prepare!(NETWORKS)
+    const history: SettledObservation[] = []
+    for (let index = 0; index < 50; index += 1) {
+      const now = T0 + index * 3_000
+      const settled = history[index - 20]
+      if (settled) { inspected.observe!(settled); control.observe!(settled) }
+      const before = inspected.beliefs(now)
+      inspected.beliefs(now + 60 * MINUTE)
+      expect(inspected.beliefs(now)).toEqual(before)
+      const decision = inspected.choose(click(3, now))!
+      expect(decision).toEqual(control.choose(click(3, now)))
+      expect(inspectedDraws).toBe(controlDraws)
+      history.push(result(decision.networkId, index % 2 === 0 ? 0.5 : 0.3, now))
+    }
+  })
+
   it('does not send a second speculative click while the first is still on its way', () => {
     // Three decisions with identical draws, half an hour after Bravo was last seen. The first tries
     // Bravo. Three seconds later that click's result is on its way and will settle the question,

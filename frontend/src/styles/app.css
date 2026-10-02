@@ -22,8 +22,10 @@
   color: color-mix(in srgb, var(--color-text) 70%, transparent);
 }
 
+.belief-table-scroll { max-width: 100%; overflow-x: auto; }
 .belief-table {
   width: 100%;
+  min-width: 800px;
   border-collapse: collapse;
   font-size: 14px;
 }
@@ -43,6 +45,84 @@
 .belief-table tbody tr:hover {
   background: color-mix(in srgb, var(--color-text) 4%, transparent);
 }
+
+.belief-panel-heading, .belief-chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+/*
+ * The eight series slots are the curves' identity colors, in a fixed order that keeps neighbors
+ * apart for color-blind readers as well. They are not Industry tokens: Industry has one accent, and
+ * fifteen networks cannot be told apart by tints of it. A ninth network repeats the first slot with
+ * a dashed line rather than taking an invented hue. See `seriesStyles` in lib/thompsonDistribution.ts.
+ */
+.belief-distributions {
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+  padding: var(--space-4);
+  border: 1px solid var(--color-divider);
+  margin-bottom: var(--space-4);
+}
+.belief-chart-header h4 {
+  margin: 0;
+  margin-right: auto;
+}
+.belief-chart-note {
+  margin: 0;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text) 65%, transparent);
+}
+.belief-chart-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+.belief-chart-option input {
+  accent-color: var(--color-accent);
+}
+.belief-chart-plot { width: 100%; min-width: 0; margin: var(--space-3) 0; }
+.belief-chart-plot svg { display: block; width: 100%; height: 300px; overflow: visible; }
+.belief-axis-label { fill: var(--color-text); font-size: 12px; }
+.belief-tick-label { fill: color-mix(in srgb, var(--color-text) 70%, transparent); font-size: 11px; font-variant-numeric: tabular-nums; }
+.belief-grid-line { stroke: color-mix(in srgb, var(--color-text) 9%, transparent); }
+.belief-zero-line { stroke: color-mix(in srgb, var(--color-text) 25%, transparent); }
+.belief-chart-empty { display: grid; place-items: center; min-height: 180px; font-size: 14px; color: color-mix(in srgb, var(--color-text) 65%, transparent); }
+.belief-chart-legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: var(--space-2); }
+.belief-legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+.belief-legend-item:hover, .belief-legend-item:focus-visible { background: color-mix(in srgb, var(--color-text) 4%, transparent); }
+.belief-legend-swatch { width: 28px; height: 8px; flex-shrink: 0; }
+.belief-legend-name { display: block; font-size: 13px; }
+.belief-legend-values { display: block; font-size: 11px; font-variant-numeric: tabular-nums; color: color-mix(in srgb, var(--color-text) 70%, transparent); }
+.belief-legend-item[aria-pressed='false'] .belief-legend-name { text-decoration: line-through; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+/* Faded, not re-patterned: the line pattern is part of which network this is. */
+.belief-legend-item[aria-pressed='false'] .belief-legend-swatch { opacity: 0.3; }
+.belief-legend-item:disabled { cursor: default; opacity: 0.5; }
+.belief-distributions > .belief-chart-note { margin-bottom: var(--space-2); }
+.belief-distributions > .belief-legend-hint { margin: var(--space-3) 0 0; }
 
 /* The pulsing status dot beside "polling". Industry names the animation; this defines it. */
 @keyframes ind-pulse {

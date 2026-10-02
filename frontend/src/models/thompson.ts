@@ -49,6 +49,10 @@ export interface NetworkBeliefView {
   estimate: number
   /** One standard deviation of doubt around that estimate. */
   uncertainty: number
+  /** The standard deviation used for draws, after counting results still on their way. */
+  samplingUncertainty: number
+  /** This model's clicks whose results are still expected at the moment asked about. */
+  inFlight: number
   /** What the network usually pays, across all of its results. */
   usual: number
   /** How much that usually varies, as one standard deviation. */
@@ -90,6 +94,11 @@ function evidence(candidate: Candidate): string {
   return inFlight === 0 ? `${estimate} (${seen})` : `${estimate} (${seen}, ${inFlight} on the way)`
 }
 
+/** Pending results reduce doubt, but cannot say which way the estimate will move. */
+function samplingUncertainty(variance: number, inFlight: number, noiseVariance: number): number {
+  return Math.sqrt(inFlight === 0 ? variance : 1 / (1 / variance + inFlight / noiseVariance))
+}
+
 export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonModel {
   const random = options.random ?? Math.random
   const config = options.config ?? DEFAULT_BELIEF_CONFIG
@@ -121,16 +130,23 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
     return prior
   }
 
-  /** How many of this model's clicks to a network are still waiting for their result at `now`. */
+  /**
+   * This model's clicks to a network that are still waiting for their result at `now`.
+   *
+   * The one rule for what counts as waiting, shared by deciding and inspecting. It reads the queue
+   * and leaves it alone, so inspecting any time, even a future one, cannot change a decision.
+   */
+  function pendingAt(networkId: string, now: number): number[] {
+    return awaited.get(networkId)?.filter((decidedAt) => now - decidedAt < disclosureDelayMs) ?? []
+  }
+
+  /** How many are waiting at a decision, which also forgets the ones that no longer are. */
   function onTheWay(networkId: string, now: number): number {
-    const times = awaited.get(networkId)
-    if (times === undefined) return 0
     // Dropped by age rather than by matching results: a click that was never routed, or whose
     // result never comes, must not hold the network's doubt down forever.
-    for (let oldest = times[0]; oldest !== undefined && now - oldest >= disclosureDelayMs; oldest = times[0]) {
-      times.shift()
-    }
-    return times.length
+    const pending = pendingAt(networkId, now)
+    if (awaited.has(networkId)) awaited.set(networkId, pending)
+    return pending.length
   }
 
   return {
@@ -158,11 +174,7 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
         const belief = beliefFor(network, current)
         const view = beliefAt(belief, now, current)
         const inFlight = onTheWay(network.id, now)
-        // Each result on its way will shrink the doubt by a known amount, whatever it says. It
-        // cannot say which way the estimate will move, so the estimate stays where it is.
-        const variance =
-          inFlight === 0 ? view.variance : 1 / (1 / view.variance + inFlight / current.noiseVariance)
-        const uncertainty = Math.sqrt(variance)
+        const uncertainty = samplingUncertainty(view.variance, inFlight, current.noiseVariance)
         return {
           network,
           observations: belief.observations,
@@ -220,10 +232,13 @@ export function thompsonSamplingModel(options: ThompsonOptions = {}): ThompsonMo
       if (current === null) return []
       return Array.from(beliefs, ([networkId, belief]) => {
         const view = beliefAt(belief, now, current)
+        const inFlight = pendingAt(networkId, now).length
         return {
           networkId,
           estimate: view.mean,
           uncertainty: Math.sqrt(view.variance),
+          samplingUncertainty: samplingUncertainty(view.variance, inFlight, current.noiseVariance),
+          inFlight,
           usual: belief.usualMean,
           usualSpread: Math.sqrt(belief.usualVariance),
           newestResultAt: belief.asOf,

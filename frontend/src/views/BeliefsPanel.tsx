@@ -1,7 +1,9 @@
+import { useId, useState } from 'react'
 import { count, duration, rate } from '../lib/format'
 import type { DecisionSummary } from '../loop/clickLog'
 import type { NetworkBeliefView } from '../models/thompson'
 import type { Network } from '../api/client'
+import { ThompsonDistributionChart } from './ThompsonDistributionChart'
 
 const MUTED = (percent: number) => `color-mix(in srgb, var(--color-text) ${percent}%, transparent)`
 
@@ -29,6 +31,9 @@ function percent(share: number): string {
  * A network with no results yet reads "(prior)": its row is the advertised claim and nothing more,
  * and the panel should not dress that up as an estimate.
  *
+ * "Show distributions" draws the same beliefs as the curves the model samples from. Those use the
+ * doubt left after counting results still on their way, which is narrower than the table's "±".
+ *
  * The table deliberately does not use Industry's `.table` class. See `.belief-table` in app.css.
  */
 export function BeliefsPanel({
@@ -45,6 +50,11 @@ export function BeliefsPanel({
   deciding: boolean
   now: number
 }) {
+  const [showDistributions, setShowDistributions] = useState(false)
+  // The chart's settings live here: the chart is unmounted while closed and would forget them.
+  const [hiddenCurves, setHiddenCurves] = useState<ReadonlySet<string>>(() => new Set())
+  const [sharedDensity, setSharedDensity] = useState(false)
+  const chartId = useId()
   const byId = new Map(networks.map((network) => [network.id, network]))
   const rows = beliefs
     .flatMap((belief) => {
@@ -55,11 +65,24 @@ export function BeliefsPanel({
       (a, b) => b.belief.estimate - a.belief.estimate || a.network.name.localeCompare(b.network.name),
     )
 
+  function toggleCurve(networkId: string) {
+    setHiddenCurves((current) => {
+      const next = new Set(current)
+      if (next.has(networkId)) next.delete(networkId)
+      else next.add(networkId)
+      return next
+    })
+  }
+
   return (
     <section aria-labelledby="beliefs-heading" style={{ marginTop: 26 }}>
-      <h3 id="beliefs-heading" style={{ margin: '0 0 6px' }}>
-        Network beliefs
-      </h3>
+      <div className="belief-panel-heading">
+        <h3 id="beliefs-heading" style={{ margin: 0 }}>Network beliefs</h3>
+        <button type="button" className="btn btn-secondary" aria-expanded={showDistributions}
+          aria-controls={chartId} onClick={() => setShowDistributions((shown) => !shown)}>
+          {showDistributions ? 'Hide distributions' : 'Show distributions'}
+        </button>
+      </div>
       <div style={{ fontSize: 13, color: MUTED(55), marginBottom: 14 }}>
         What the thompson model thinks each network pays per click. It learns from every disclosed
         result, whichever model decided the click
@@ -69,58 +92,72 @@ export function BeliefsPanel({
           : null}
       </div>
 
+      <div id={chartId}>
+        {showDistributions ? (
+          <ThompsonDistributionChart
+            rows={rows}
+            hidden={hiddenCurves}
+            onToggle={toggleCurve}
+            sharedDensity={sharedDensity}
+            onSharedDensity={setSharedDensity}
+          />
+        ) : null}
+      </div>
+
       {rows.length === 0 ? (
         <div style={{ padding: '6px 0 18px', fontSize: 14, color: MUTED(45) }}>
           No beliefs yet. Each network starts from its advertised rate once the network list has loaded.
         </div>
       ) : (
-        <table className="belief-table">
-          <thead>
-            <tr>
-              <th style={{ width: '22%' }}>Network</th>
-              <th style={{ width: '11%', textAlign: 'right' }}>Advertised</th>
-              <th
-                style={{ width: '19%', textAlign: 'right' }}
-                title="What it has paid across all of its results, and how much that has varied"
-              >
-                Usually
-              </th>
-              <th style={{ width: '11%', textAlign: 'right' }} title="What the model thinks it pays right now">
-                Estimate
-              </th>
-              <th style={{ width: '9%', textAlign: 'right' }} title="One standard deviation of doubt, right now">
-                ±
-              </th>
-              <th style={{ width: '12%', textAlign: 'right' }}>Newest result</th>
-              <th style={{ width: '7%', textAlign: 'right' }}>Results</th>
-              <th style={{ width: '9%', textAlign: 'right' }}>Last {count(summary.routed)} clicks</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(({ belief, network }) => {
-              const share = summary.shareByNetwork.get(network.id)
-              const unseen = belief.observations === 0
-              return (
-                <tr key={network.id}>
-                  <td>{network.name}</td>
-                  <td style={{ ...NUMERIC, color: MUTED(60) }}>{rate(network.advertisedRate)}</td>
-                  <td style={{ ...NUMERIC, color: MUTED(60) }}>
-                    {unseen ? '—' : `${rate(belief.usual)} ± ${rate(belief.usualSpread)}`}
-                  </td>
-                  <td style={NUMERIC}>
-                    {unseen ? <span style={{ color: MUTED(45) }}>(prior)</span> : rate(belief.estimate)}
-                  </td>
-                  <td style={{ ...NUMERIC, color: MUTED(60) }}>{rate(belief.uncertainty)}</td>
-                  <td style={{ ...NUMERIC, color: MUTED(60) }}>
-                    {belief.newestResultAt === null ? 'never' : `${duration(now - belief.newestResultAt)} ago`}
-                  </td>
-                  <td style={{ ...NUMERIC, color: MUTED(60) }}>{count(belief.observations)}</td>
-                  <td style={NUMERIC}>{share === undefined ? '—' : percent(share)}</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+        <div className="belief-table-scroll">
+          <table className="belief-table">
+            <thead>
+              <tr>
+                <th style={{ width: '22%' }}>Network</th>
+                <th style={{ width: '11%', textAlign: 'right' }}>Advertised</th>
+                <th
+                  style={{ width: '19%', textAlign: 'right' }}
+                  title="What it has paid across all of its results, and how much that has varied"
+                >
+                  Usually
+                </th>
+                <th style={{ width: '11%', textAlign: 'right' }} title="What the model thinks it pays right now">
+                  Estimate
+                </th>
+                <th style={{ width: '9%', textAlign: 'right' }} title="One standard deviation of doubt, right now">
+                  ±
+                </th>
+                <th style={{ width: '12%', textAlign: 'right' }}>Newest result</th>
+                <th style={{ width: '7%', textAlign: 'right' }}>Results</th>
+                <th style={{ width: '9%', textAlign: 'right' }}>Last {count(summary.routed)} clicks</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(({ belief, network }) => {
+                const share = summary.shareByNetwork.get(network.id)
+                const unseen = belief.observations === 0
+                return (
+                  <tr key={network.id}>
+                    <td>{network.name}</td>
+                    <td style={{ ...NUMERIC, color: MUTED(60) }}>{rate(network.advertisedRate)}</td>
+                    <td style={{ ...NUMERIC, color: MUTED(60) }}>
+                      {unseen ? '—' : `${rate(belief.usual)} ± ${rate(belief.usualSpread)}`}
+                    </td>
+                    <td style={NUMERIC}>
+                      {unseen ? <span style={{ color: MUTED(45) }}>(prior)</span> : rate(belief.estimate)}
+                    </td>
+                    <td style={{ ...NUMERIC, color: MUTED(60) }}>{rate(belief.uncertainty)}</td>
+                    <td style={{ ...NUMERIC, color: MUTED(60) }}>
+                      {belief.newestResultAt === null ? 'never' : `${duration(now - belief.newestResultAt)} ago`}
+                    </td>
+                    <td style={{ ...NUMERIC, color: MUTED(60) }}>{count(belief.observations)}</td>
+                    <td style={NUMERIC}>{share === undefined ? '—' : percent(share)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   )
