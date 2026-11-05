@@ -1,7 +1,13 @@
 import { count, rate, shortClickId, utcTime } from '../lib/format'
 import { applyFilters, filtersAreEmpty, NO_FILTERS, type Filters } from '../lib/filter'
 import { applySort, nextSort, type SortState } from '../lib/sort'
-import { clickState, isTerminal, type ClickRecord, type ClickState } from '../loop/clickLog'
+import {
+  clickState,
+  isTerminal,
+  type ClickRecord,
+  type ClickState,
+  type DecisionRecord,
+} from '../loop/clickLog'
 import type { Network } from '../api/client'
 import { AlertIcon } from './AlertIcon'
 import { SortableHeader } from './SortableHeader'
@@ -40,6 +46,30 @@ function CommissionCell({ click, state }: { click: ClickRecord; state: ClickStat
   }
   const spent = isTerminal(state) && state !== 'settled'
   return <span style={{ color: MUTED(35) }}>{spent ? 'spent' : '—'}</span>
+}
+
+/**
+ * Why the click went where it did: which model decided, whether it was playing its favorite or
+ * exploring, and its own account of the choice.
+ *
+ * The model is named on every row because the active model can be switched mid-run, so one feed
+ * can hold decisions from several. A model with no notion of a favorite shows its name alone.
+ */
+function DecisionCell({ decision }: { decision: DecisionRecord | null }) {
+  if (decision === null) return <span style={{ color: MUTED(35) }}>—</span>
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <span className="tag tag-neutral">{decision.modelName}</span>
+        {decision.exploratory === null ? null : (
+          <span className={decision.exploratory ? 'tag tag-outline' : 'tag tag-accent'}>
+            {decision.exploratory ? 'exploring' : 'favorite'}
+          </span>
+        )}
+      </div>
+      <span style={{ fontSize: 11, color: MUTED(55) }}>{decision.rationale}</span>
+    </div>
+  )
 }
 
 export function ClickFeed({
@@ -176,19 +206,21 @@ export function ClickFeed({
       <table className="table">
         <thead>
           <tr>
-            <SortableHeader label="Click" sortKey="click" sort={sort} onSort={cycle} width="11%" />
-            <SortableHeader label="Issued" sortKey="issued" sort={sort} onSort={cycle} width="11%" />
-            <SortableHeader label="Merchant" sortKey="merchant" sort={sort} onSort={cycle} width="22%" />
-            <SortableHeader label="Routed to" sortKey="network" sort={sort} onSort={cycle} width="22%" />
-            <SortableHeader label="State" sortKey="state" sort={sort} onSort={cycle} width="18%" />
+            <SortableHeader label="Click" sortKey="click" sort={sort} onSort={cycle} width="8%" />
+            <SortableHeader label="Issued" sortKey="issued" sort={sort} onSort={cycle} width="9%" />
+            <SortableHeader label="Merchant" sortKey="merchant" sort={sort} onSort={cycle} width="17%" />
+            <SortableHeader label="Routed to" sortKey="network" sort={sort} onSort={cycle} width="16%" />
+            <SortableHeader label="State" sortKey="state" sort={sort} onSort={cycle} width="11%" />
             <SortableHeader
               label="Commission"
               sortKey="commission"
               sort={sort}
               onSort={cycle}
-              width="16%"
+              width="11%"
               align="right"
             />
+            {/* Last on purpose: the end-to-end suite reads the first six cells by position. */}
+            <th style={{ width: '28%', paddingLeft: 24 }}>Why</th>
           </tr>
         </thead>
         <tbody>
@@ -232,6 +264,9 @@ export function ClickFeed({
                 </td>
                 <td className="tnum" style={{ padding: '12px var(--space-2)', textAlign: 'right' }}>
                   <CommissionCell click={click} state={state} />
+                </td>
+                <td style={{ padding: '12px var(--space-2) 12px 24px' }}>
+                  <DecisionCell decision={click.decision} />
                 </td>
               </tr>
             )

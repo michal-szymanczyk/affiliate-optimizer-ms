@@ -12,6 +12,16 @@
 
 export type ClickState = 'issued' | 'routed' | 'settled' | 'rejected' | 'expired'
 
+/**
+ * Which optimization model decided a click, and what it said about the choice.
+ */
+export interface DecisionRecord {
+  modelName: string
+  rationale: string
+  /** Whether the model knowingly passed over its favorite. Null for a model with no such notion. */
+  exploratory: boolean | null
+}
+
 export interface ClickRecord {
   clickId: string
   merchantId: number
@@ -27,6 +37,11 @@ export interface ClickRecord {
   disclosedAt: number | null
   /** A §5 code: from a synchronous rejection, or from the feed. */
   errorCode: string | null
+  /**
+   * Null while no model has chosen a network for the click: before the decision, and for good when
+   * nothing covered the merchant or the model failed. Such a click lapses.
+   */
+  decision: DecisionRecord | null
 }
 
 /**
@@ -111,6 +126,51 @@ export function runCounters(clicks: readonly ClickRecord[], now: number): RunCou
     totalCommission: Math.round(totalCommission * 10_000) / 10_000,
     perSettledClick: settled === 0 ? null : Math.round((totalCommission / settled) * 10_000) / 10_000,
   }
+}
+
+export interface DecisionSummary {
+  /** Routed clicks in the window: the denominator for `shareByNetwork`. */
+  routed: number
+  /** Of those, how many the named model decided. */
+  decided: number
+  /** Of those it decided, how many it flagged as exploratory. */
+  exploratory: number
+  /** Share of the window's routed clicks sent to each network, by network id. */
+  shareByNetwork: ReadonlyMap<string, number>
+}
+
+/**
+ * Where the most recent routed clicks went, and how often one model chose to explore.
+ *
+ * A window rather than the whole run, because the question an operator is asking is "what is it
+ * doing NOW". A share over the whole run would still be reporting the first minute's spread of
+ * clicks an hour later.
+ */
+export function decisionSummary(
+  clicks: readonly ClickRecord[],
+  modelName: string,
+  window = 100,
+): DecisionSummary {
+  const counts = new Map<string, number>()
+  let routed = 0
+  let decided = 0
+  let exploratory = 0
+
+  for (let index = clicks.length - 1; index >= 0 && routed < window; index -= 1) {
+    const click = clicks[index]
+    if (!click || click.routedNetworkId === null) continue
+
+    routed += 1
+    counts.set(click.routedNetworkId, (counts.get(click.routedNetworkId) ?? 0) + 1)
+    if (click.decision?.modelName === modelName) {
+      decided += 1
+      if (click.decision.exploratory === true) exploratory += 1
+    }
+  }
+
+  const shareByNetwork = new Map<string, number>()
+  for (const [networkId, count] of counts) shareByNetwork.set(networkId, count / routed)
+  return { routed, decided, exploratory, shareByNetwork }
 }
 
 /**

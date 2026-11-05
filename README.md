@@ -63,9 +63,17 @@ lists, pulls a click, picks a network, routes it, polls for commissions as they 
 and shows them with a running total. Rate limits, paging, and safe recovery after an ambiguous
 route response are handled, so you should not need to revisit them unless you want to.
 
-It is naive at exactly one point: the **optimization model** choosing where a click goes. The
-shipped optimization model filters the networks down to those covering the click's merchant, then
-picks one uniformly at random.
+The one decision that matters is made by the **optimization model** choosing where a click goes.
+Two are shipped, and the header's Model select switches between them mid-run:
+
+- `thompson` (the default) keeps a belief about what each network pays and how sure it is, draws
+  one plausible payout per eligible network, and routes to the highest draw. Its beliefs are shown
+  in the Network beliefs panel above the feed.
+- `random` is the control: it filters the networks down to those covering the click's merchant,
+  then picks one uniformly at random.
+
+Every model is told about every disclosed commission, whichever model routed the click, so the one
+that is not deciding keeps learning. Each row of the feed records which model decided it and why.
 
 ```
 frontend/src/
@@ -79,9 +87,13 @@ frontend/src/
     clickLog.ts    the client's own record of the run. State is derived, never stored.
     backoff.ts     pacing and retry arithmetic, pure
   models/
-    random.ts      >>> the random optimization model. The naive bit, and the interesting file. <<<
-  views/           the example UI
-  lib/             formatting, filtering, sorting
+    model.ts       the contract every optimization model implements: prepare, choose, observe
+    thompson.ts    >>> the Thompson sampling model. The interesting file. <<<
+    belief.ts      what the Thompson model believes about one network, and how results and time move it
+    random.ts      the random optimization model. The control the other is measured against.
+    sim/           synthetic worlds for running a model through simulated hours. Test support only.
+  views/           the example UI, the model select and the Network beliefs panel
+  lib/             formatting, filtering, sorting, randomness helpers, chart arithmetic
 ```
 
 One thing to know before you touch the loop: a route request may reach the server even when its

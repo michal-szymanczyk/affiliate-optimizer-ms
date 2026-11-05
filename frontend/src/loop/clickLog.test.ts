@@ -6,7 +6,15 @@
  * wrong by dividing by the wrong denominator.
  */
 import { describe, expect, it } from 'vitest'
-import { ClickLog, clickState, isTerminal, runCounters, type ClickRecord, type ClickState } from './clickLog'
+import {
+  ClickLog,
+  clickState,
+  decisionSummary,
+  isTerminal,
+  runCounters,
+  type ClickRecord,
+  type ClickState,
+} from './clickLog'
 
 const T0 = 1_700_000_000_000
 const EXPIRY = T0 + 120_000
@@ -24,6 +32,7 @@ function record(overrides: Partial<ClickRecord> = {}): ClickRecord {
     commission: null,
     disclosedAt: null,
     errorCode: null,
+    decision: null,
     ...overrides,
   }
 }
@@ -131,6 +140,59 @@ describe('runCounters', () => {
     expect(counters.completed).toBe(1)
     expect(counters.settled).toBe(0)
     expect(counters.perSettledClick).toBeNull()
+  })
+})
+
+describe('decisionSummary', () => {
+  function routedTo(networkId: string, modelName: string, exploratory: boolean | null): ClickRecord {
+    return record({
+      routedAt: T0,
+      routedNetworkId: networkId,
+      decision: { modelName, rationale: 'because', exploratory },
+    })
+  }
+
+  it('summarizes an empty run without dividing by zero', () => {
+    const summary = decisionSummary([], 'thompson')
+    expect(summary).toMatchObject({ routed: 0, decided: 0, exploratory: 0 })
+    expect(summary.shareByNetwork.size).toBe(0)
+  })
+
+  it('shares out the routed clicks by network, leaving out clicks that never went anywhere', () => {
+    const clicks = [
+      routedTo('net-a', 'thompson', false),
+      routedTo('net-a', 'thompson', false),
+      routedTo('net-b', 'thompson', true),
+      // Issued, never routed: it did not go to any network, so it is in no network's share.
+      record(),
+    ]
+    const summary = decisionSummary(clicks, 'thompson')
+
+    expect(summary.routed).toBe(3)
+    expect(summary.shareByNetwork.get('net-a')).toBeCloseTo(2 / 3)
+    expect(summary.shareByNetwork.get('net-b')).toBeCloseTo(1 / 3)
+  })
+
+  it('counts exploration for the named model only', () => {
+    const clicks = [
+      routedTo('net-a', 'thompson', true),
+      routedTo('net-a', 'thompson', false),
+      // Still a routed click, so it counts toward the shares. But another model decided it, and
+      // the random model has no favorite to pass over.
+      routedTo('net-b', 'random', null),
+    ]
+
+    expect(decisionSummary(clicks, 'thompson')).toMatchObject({ routed: 3, decided: 2, exploratory: 1 })
+  })
+
+  it('looks at the most recent window only, so it describes now rather than the whole run', () => {
+    const early = Array.from({ length: 50 }, () => routedTo('net-a', 'thompson', true))
+    const recent = Array.from({ length: 10 }, () => routedTo('net-b', 'thompson', false))
+    const summary = decisionSummary([...early, ...recent], 'thompson', 10)
+
+    expect(summary).toMatchObject({ routed: 10, decided: 10, exploratory: 0 })
+    expect(summary.shareByNetwork.get('net-b')).toBe(1)
+    expect(summary.shareByNetwork.has('net-a')).toBe(false)
   })
 })
 

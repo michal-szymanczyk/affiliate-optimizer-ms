@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { AffiliateServiceClient } from './api/client'
 import { readConfig } from './api/config'
-import { ClickLog, runCounters } from './loop/clickLog'
+import { ClickLog, decisionSummary, runCounters } from './loop/clickLog'
 import { RunLoop } from './loop/runLoop'
 import { randomOptimizationModel } from './models/random'
+import { thompsonSamplingModel, type ThompsonModel } from './models/thompson'
 import { NO_FILTERS, type Filters } from './lib/filter'
 import { NO_SORT, type SortState } from './lib/sort'
+import { BeliefsPanel } from './views/BeliefsPanel'
 import { ClickFeed } from './views/ClickFeed'
 import { Counters } from './views/Counters'
 import { FeedErrorStrip } from './views/FeedErrorStrip'
+import { ModelSelect } from './views/ModelSelect'
 
 /** One tick a second drives the runtime counter and every derived click state. */
 const TICK_MS = 1_000
@@ -31,6 +34,7 @@ export function App() {
 
   const log = useMemo(() => new ClickLog(), [])
   const loopRef = useRef<RunLoop | null>(null)
+  const modelsRef = useRef<{ thompson: ThompsonModel; names: readonly string[] } | null>(null)
 
   useEffect(() => {
     let config
@@ -43,13 +47,17 @@ export function App() {
       return
     }
 
+    const thompson = thompsonSamplingModel()
+    const models = [thompson, randomOptimizationModel()]
+
     const loop = new RunLoop({
       client: new AffiliateServiceClient(config),
-      optimizationModel: randomOptimizationModel(),
+      models,
       log,
       onChange: forceRender,
     })
     loopRef.current = loop
+    modelsRef.current = { thompson, names: models.map((model) => model.name) }
 
     loop.start().catch((cause: unknown) => {
       setFatal(cause instanceof Error ? cause.message : String(cause))
@@ -58,6 +66,7 @@ export function App() {
     return () => {
       loop.stop()
       loopRef.current = null
+      modelsRef.current = null
     }
   }, [log])
 
@@ -67,10 +76,13 @@ export function App() {
   }, [])
 
   const loop = loopRef.current
+  const models = modelsRef.current
   const clicks = log.all()
   const counters = runCounters(clicks, now)
   const running = loop?.state.running ?? false
   const feedError = loop?.state.feedError ?? null
+  const modelError = loop?.state.modelError ?? null
+  const activeModelName = loop?.state.activeModelName ?? ''
 
   return (
     <div
@@ -99,6 +111,13 @@ export function App() {
             Client
           </span>
         </div>
+
+        <ModelSelect
+          names={models?.names ?? []}
+          active={activeModelName}
+          disabled={loop === null || fatal !== null}
+          onSelect={(name) => loop?.selectModel(name)}
+        />
 
         <div
           style={{
@@ -161,6 +180,20 @@ export function App() {
 
             {feedError !== null ? (
               <FeedErrorStrip error={feedError} onDismiss={() => loop?.dismissFeedError()} />
+            ) : null}
+
+            {modelError !== null ? (
+              <FeedErrorStrip error={modelError} onDismiss={() => loop?.dismissModelError()} />
+            ) : null}
+
+            {models !== null ? (
+              <BeliefsPanel
+                networks={loop?.state.networks ?? []}
+                beliefs={models.thompson.beliefs(now)}
+                summary={decisionSummary(clicks, models.thompson.name)}
+                deciding={activeModelName === models.thompson.name}
+                now={now}
+              />
             ) : null}
 
             <ClickFeed
